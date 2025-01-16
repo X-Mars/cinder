@@ -339,7 +339,8 @@ class TestWindowsISCSIDriver(test.TestCase):
         image_utils.fetch_to_vhd.assert_called_once_with(
             mock.sentinel.context, mock.sentinel.image_service,
             mock.sentinel.image_id, mock.sentinel.tmp_vhd_path,
-            self._driver.configuration.volume_dd_blocksize)
+            self._driver.configuration.volume_dd_blocksize,
+            disable_sparse=False)
 
         mock_unlink.assert_called_once_with(mock.sentinel.vol_vhd_path)
         self._driver._vhdutils.convert_vhd.assert_called_once_with(
@@ -415,7 +416,8 @@ class TestWindowsISCSIDriver(test.TestCase):
             expected_tmp_vhd_path)
         mock_upload_volume.assert_called_once_with(
             mock.sentinel.context, mock.sentinel.image_service,
-            fake_image_meta, expected_tmp_vhd_path, volume_format='vhd',
+            fake_image_meta, expected_tmp_vhd_path, volume_fd=None,
+            volume_format='vhd',
             store_id='fake-store', base_image_ref=None,
             compress=True, run_as_root=True)
         mock_delete_if_exists.assert_called_once_with(

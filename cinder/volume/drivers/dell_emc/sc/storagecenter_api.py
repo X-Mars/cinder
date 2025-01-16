@@ -13,6 +13,7 @@
 #    under the License.
 """Interface for interacting with the Dell Storage Center array."""
 
+import http.client as http_client
 import json
 import os.path
 import uuid
@@ -21,8 +22,6 @@ import eventlet
 from oslo_log import log as logging
 from oslo_utils import excutils
 import requests
-import six
-from six.moves import http_client
 
 from cinder.common import constants
 from cinder import exception
@@ -722,7 +721,7 @@ class SCApi(object):
         ret = False
         if provider_id:
             try:
-                if provider_id.split('.')[0] == six.text_type(self.ssn):
+                if provider_id.split('.')[0] == str(self.ssn):
                     ret = True
                 else:
                     LOG.debug('_use_provider_id: provider_id '
@@ -1531,7 +1530,7 @@ class SCApi(object):
         if hba is not None and hba.get('server') is not None:
             pf = self._get_payload_filter()
             pf.append('scSerialNumber', ssn)
-            pf.append('instanceId', self._get_id(hba['server']))
+            pf.append('instanceId', self._get_id(hba['server']).upper())
             r = self.client.post('StorageCenter/ScServer/GetList', pf.payload)
             if self._check_result(r):
                 scserver = self._first_result(r)
@@ -1555,7 +1554,7 @@ class SCApi(object):
         # We search for our server by first finding our HBA
         pf = self._get_payload_filter()
         pf.append('scSerialNumber', ssn)
-        pf.append('instanceName', instance_name)
+        pf.append('instanceName', instance_name.upper())
         r = self.client.post('StorageCenter/ScServerHba/GetList', pf.payload)
         if self._check_result(r):
             scserverhba = self._first_result(r)
@@ -1591,7 +1590,7 @@ class SCApi(object):
                 wwn = hba.get('instanceName')
                 if (hba.get('portType') == self.protocol and
                         wwn is not None):
-                    initiators.append(wwn)
+                    initiators.append(wwn.upper())
         else:
             LOG.error('Unable to find initiators')
         LOG.debug('_find_initiators: %s', initiators)
@@ -1703,7 +1702,9 @@ class SCApi(object):
                     serverhba = mapping.get('serverHba')
                     if serverhba:
                         hbaname = serverhba.get('instanceName')
-                        if hbaname in initiators:
+                        if hbaname.upper() in list(
+                            map(lambda x: x.upper(), initiators)
+                        ):
                             if itmap.get(hbaname) is None:
                                 itmap[hbaname] = []
                             itmap[hbaname].append(wwn)
@@ -1846,7 +1847,7 @@ class SCApi(object):
 
             if process_it:
                 # Make sure this isn't a duplicate.
-                newportal = address + ':' + six.text_type(port)
+                newportal = address + ':' + str(port)
                 for idx, portal in enumerate(portals):
                     if (portal == newportal
                             and iqns[idx] == iqn

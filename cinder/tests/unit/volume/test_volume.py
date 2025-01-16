@@ -29,6 +29,7 @@ import eventlet
 import os_brick.initiator.connectors.iscsi
 from oslo_concurrency import processutils
 from oslo_config import cfg
+from oslo_utils.fixture import uuidsentinel as uuids
 from oslo_utils import imageutils
 from taskflow.engines.action_engine import engine
 
@@ -424,6 +425,7 @@ class VolumeTestCase(base.BaseVolumeTestCase):
             self.context,
             availability_zone=CONF.storage_availability_zone,
             migration_status='target:123',
+            use_quota=False,
             **self.volume_params)
         volume_id = volume['id']
 
@@ -1720,15 +1722,15 @@ class VolumeTestCase(base.BaseVolumeTestCase):
     @ddt.data({'connector_class':
                os_brick.initiator.connectors.iscsi.ISCSIConnector,
                'rekey_supported': True,
-               'already_encrypted': 'yes'},
+               'already_encrypted': True},
               {'connector_class':
                os_brick.initiator.connectors.iscsi.ISCSIConnector,
                'rekey_supported': True,
-               'already_encrypted': 'no'},
+               'already_encrypted': False},
               {'connector_class':
                os_brick.initiator.connectors.rbd.RBDConnector,
                'rekey_supported': False,
-               'already_encrypted': 'no'})
+               'already_encrypted': False})
     @ddt.unpack
     @mock.patch('cinder.volume.volume_utils.delete_encryption_key')
     @mock.patch('cinder.volume.flows.manager.create_volume.'
@@ -1746,9 +1748,11 @@ class VolumeTestCase(base.BaseVolumeTestCase):
             already_encrypted=None):
         # create source volume
         mock_execute.return_value = ('', '')
-        mock_enc_metadata_get.return_value = {'cipher': 'aes-xts-plain64',
-                                              'key_size': 256,
-                                              'provider': 'luks'}
+        mock_enc_metadata_get.return_value = {
+            'cipher': 'aes-xts-plain64',
+            'key_size': 256,
+            'provider': 'luks',
+            'encryption_key_id': fake.ENCRYPTION_KEY_ID}
         mock_setup_enc_keys.return_value = (
             'qwert',
             'asdfg',
@@ -1800,7 +1804,8 @@ class VolumeTestCase(base.BaseVolumeTestCase):
                 src_vol,
                 {'key_size': 256,
                  'provider': 'luks',
-                 'cipher': 'aes-xts-plain64'}
+                 'cipher': 'aes-xts-plain64',
+                 'encryption_key_id': fake.ENCRYPTION_KEY_ID}
             )
             if already_encrypted:
                 mock_execute.assert_called_once_with(
@@ -1814,6 +1819,7 @@ class VolumeTestCase(base.BaseVolumeTestCase):
             else:
                 mock_execute.assert_called_once_with(
                     'cryptsetup', '--batch-mode', 'luksFormat',
+                    '--force-password',
                     '--type', 'luks1',
                     '--cipher', 'aes-xts-plain64', '--key-size', '256',
                     '--key-file=-', '/some/device/thing',
@@ -2251,9 +2257,9 @@ class VolumeTestCase(base.BaseVolumeTestCase):
                                                     fake_volume.id)
         with mock.patch.object(
                 self.volume.driver,
-                '_create_temp_volume_from_snapshot') as mock_temp,\
+                '_create_temp_volume_from_snapshot') as mock_temp, \
             mock.patch.object(
-                self.volume.driver, 'delete_volume') as mock_driver_delete,\
+                self.volume.driver, 'delete_volume') as mock_driver_delete, \
                 mock.patch.object(
                     self.volume, '_copy_volume_data') as mock_copy:
             temp_volume = tests_utils.create_volume(self.context,
@@ -2275,7 +2281,7 @@ class VolumeTestCase(base.BaseVolumeTestCase):
         with mock.patch.object(self.volume.driver,
                                'revert_to_snapshot') as driver_revert, \
             mock.patch.object(self.volume, '_notify_about_volume_usage'), \
-            mock.patch.object(self.volume, '_notify_about_snapshot_usage'),\
+            mock.patch.object(self.volume, '_notify_about_snapshot_usage'), \
             mock.patch.object(self.volume,
                               '_revert_to_snapshot_generic') as generic_revert:
             if driver_error:
@@ -2305,9 +2311,9 @@ class VolumeTestCase(base.BaseVolumeTestCase):
                                                     status='restoring',
                                                     volume_size=1)
         with mock.patch.object(self.volume,
-                               '_revert_to_snapshot') as _revert,\
+                               '_revert_to_snapshot') as _revert, \
             mock.patch.object(self.volume,
-                              '_create_backup_snapshot') as _create_snapshot,\
+                              '_create_backup_snapshot') as _create_snapshot, \
             mock.patch.object(self.volume,
                               'delete_snapshot') as _delete_snapshot, \
             mock.patch.object(self.volume.driver,
@@ -2803,7 +2809,7 @@ class VolumeTestCase(base.BaseVolumeTestCase):
             with mock.patch.object(
                     self.volume.message_api, 'create') as mock_create:
                 volume['status'] = 'extending'
-                self.volume.extend_volume(self.context, volume, '4',
+                self.volume.extend_volume(self.context, volume, 4,
                                           fake_reservations)
                 volume.refresh()
                 self.assertEqual(2, volume.size)
@@ -2831,7 +2837,7 @@ class VolumeTestCase(base.BaseVolumeTestCase):
             with mock.patch.object(QUOTAS, 'commit') as quotas_commit:
                 extend_volume.return_value = fake_extend
                 volume.status = 'extending'
-                self.volume.extend_volume(self.context, volume, '4',
+                self.volume.extend_volume(self.context, volume, 4,
                                           fake_reservations)
                 volume.refresh()
                 self.assertEqual(4, volume.size)
@@ -2944,6 +2950,77 @@ class VolumeTestCase(base.BaseVolumeTestCase):
             volumes_reserved = 0
 
         self.assertEqual(100, volumes_reserved)
+
+    @mock.patch('cinder.compute.nova.API.extend_volume')
+    @mock.patch('cinder.volume.manager.VolumeManager.'
+                'extend_volume_completion')
+    def test_extend_volume_no_wait_for_nova_available(self,
+                                                      extend_completion,
+                                                      nova_extend):
+        volume = tests_utils.create_volume(self.context, size=2,
+                                           status='extending')
+
+        with mock.patch.object(self.volume.driver, 'extend_volume'):
+            self.volume.extend_volume(self.context, volume, 4,
+                                      [uuids.reservation])
+
+            extend_completion.assert_called_once_with(self.context,
+                                                      volume,
+                                                      4,
+                                                      [uuids.reservation],
+                                                      error=False)
+            nova_extend.assert_not_called()
+            self.assertNotIn('extend_new_size', volume.admin_metadata)
+            self.assertNotIn('extend_reservations', volume.admin_metadata)
+
+    @mock.patch('cinder.compute.nova.API.extend_volume')
+    @mock.patch('cinder.volume.manager.VolumeManager.'
+                'extend_volume_completion')
+    def test_extend_volume_no_wait_for_nova_attached(self,
+                                                     extend_completion,
+                                                     nova_extend):
+        volume = tests_utils.create_volume(self.context, size=2)
+        tests_utils.attach_volume(self.context, volume.id, uuids.instance,
+                                  'fake-host', '/dev/vda')
+        db.volume_update(self.context, volume.id, {'status': 'extending'})
+        volume.refresh()
+
+        with mock.patch.object(self.volume.driver, 'extend_volume'):
+            self.volume.extend_volume(self.context, volume, 4,
+                                      [uuids.reservation])
+
+            extend_completion.assert_called_once_with(self.context,
+                                                      volume,
+                                                      4,
+                                                      [uuids.reservation],
+                                                      error=False)
+            nova_extend.assert_called_once_with(self.context,
+                                                [uuids.instance],
+                                                volume.id)
+            self.assertNotIn('extend_new_size', volume.admin_metadata)
+            self.assertNotIn('extend_reservations', volume.admin_metadata)
+
+    @mock.patch('cinder.compute.nova.API.extend_volume', return_value=False)
+    @mock.patch('cinder.volume.manager.VolumeManager.'
+                'extend_volume_completion')
+    def test_extend_volume_no_wait_for_nova_fail_to_send(self,
+                                                         extend_completion,
+                                                         nova_extend):
+        volume = tests_utils.create_volume(self.context, size=2)
+        tests_utils.attach_volume(self.context, volume.id, uuids.instance,
+                                  'fake-host', '/dev/vda')
+        db.volume_update(self.context, volume.id, {'status': 'extending'})
+        volume.refresh()
+
+        with mock.patch.object(self.volume.driver, 'extend_volume'):
+            self.volume.extend_volume(self.context, volume, 4,
+                                      [uuids.reservation])
+
+            extend_completion.assert_called_once_with(self.context,
+                                                      volume,
+                                                      4,
+                                                      [uuids.reservation],
+                                                      error=False)
 
     def test_create_volume_from_sourcevol(self):
         """Test volume can be created from a source volume."""

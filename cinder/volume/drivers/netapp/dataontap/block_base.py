@@ -27,14 +27,12 @@ Volume driver library for NetApp 7/C-mode block storage systems.
 
 import copy
 import math
-import sys
 import uuid
 
 from oslo_log import log as logging
 from oslo_log import versionutils
 from oslo_utils import excutils
 from oslo_utils import units
-import six
 
 from cinder import exception
 from cinder.i18n import _
@@ -70,8 +68,8 @@ class NetAppLun(object):
                self.handle, self.name, self.size, self.metadata)
 
 
-@six.add_metaclass(volume_utils.TraceWrapperMetaclass)
-class NetAppBlockStorageLibrary(object):
+class NetAppBlockStorageLibrary(
+        object, metaclass=volume_utils.TraceWrapperMetaclass):
     """NetApp block storage library for Data ONTAP."""
 
     # do not increment this as it may be used in volume type definitions
@@ -224,12 +222,17 @@ class NetAppBlockStorageLibrary(object):
 
         extra_specs = na_utils.get_volume_extra_specs(volume)
 
+        space_allocation = volume_utils.is_boolean_str(
+            extra_specs.get('netapp:space_allocation')
+        )
+        LOG.debug('create_volume space_allocation %r', space_allocation)
         lun_name = volume['name']
 
         size = int(volume['size']) * units.Gi
 
         metadata = {'OsType': self.lun_ostype,
                     'SpaceReserved': self.lun_space_reservation,
+                    'SpaceAllocated': str(space_allocation).lower(),
                     'Path': '/vol/%s/%s' % (pool_name, lun_name)}
 
         qos_policy_group_info = self._setup_qos_for_volume(volume, extra_specs)
@@ -438,14 +441,13 @@ class NetAppBlockStorageLibrary(object):
                         {'ig_nm': igroup_name, 'ig_os': ig_host_os})
         try:
             return self.zapi_client.map_lun(path, igroup_name, lun_id=lun_id)
-        except netapp_api.NaApiError:
-            exc_info = sys.exc_info()
+        except netapp_api.NaApiError as e:
             (_igroup, lun_id) = self._find_mapped_lun_igroup(path,
                                                              initiator_list)
             if lun_id is not None:
                 return lun_id
             else:
-                six.reraise(*exc_info)
+                raise e
 
     def _unmap_lun(self, path, initiator_list):
         """Unmaps a LUN from given initiator."""
@@ -496,7 +498,7 @@ class NetAppBlockStorageLibrary(object):
     def _create_igroup_add_initiators(self, initiator_group_type,
                                       host_os_type, initiator_list):
         """Creates igroup and adds initiators."""
-        igroup_name = na_utils.OPENSTACK_PREFIX + six.text_type(uuid.uuid4())
+        igroup_name = na_utils.OPENSTACK_PREFIX + str(uuid.uuid4())
         self.zapi_client.create_igroup(igroup_name, initiator_group_type,
                                        host_os_type)
         for initiator in initiator_list:
@@ -600,8 +602,8 @@ class NetAppBlockStorageLibrary(object):
         name = volume['name']
         lun = self._get_lun_from_table(name)
         path = lun.metadata['Path']
-        curr_size_bytes = six.text_type(lun.size)
-        new_size_bytes = six.text_type(int(new_size) * units.Gi)
+        curr_size_bytes = str(lun.size)
+        new_size_bytes = str(int(new_size) * units.Gi)
         # Reused by clone scenarios.
         # Hence comparing the stored size.
         if curr_size_bytes == new_size_bytes:
@@ -711,6 +713,16 @@ class NetAppBlockStorageLibrary(object):
                     LOG.error("Unknown exception in"
                               " post clone resize LUN %s.", seg[-1])
                     LOG.error("Exception details: %s", e)
+
+    def _is_space_alloc_enabled(self, path):
+        """Gets space allocation details for the LUN."""
+        LOG.debug("Getting LUN space allocation enabled.")
+        lun_infos = self.zapi_client.get_lun_by_args(path=path)
+        if not lun_infos:
+            seg = path.split('/')
+            msg = _('Failure getting LUN info for %s' % seg[-1])
+            raise exception.VolumeBackendAPIException(data=msg)
+        return lun_infos[0]['SpaceAllocated'] == "true"
 
     def _get_lun_block_count(self, path):
         """Gets block counts for the LUN."""
@@ -844,6 +856,7 @@ class NetAppBlockStorageLibrary(object):
         """
 
         initiator_name = connector['initiator']
+        lun_path = volume['provider_location'].split(':')[1]
         name = volume['name']
         lun_id = self._map_lun(name, [initiator_name], 'iscsi', None)
 
@@ -874,7 +887,7 @@ class NetAppBlockStorageLibrary(object):
         properties = na_utils.get_iscsi_connection_properties(lun_id, volume,
                                                               iqn, addresses,
                                                               ports)
-
+        properties['discard'] = self._is_space_alloc_enabled(lun_path)
         if self.configuration.use_chap_auth:
             chap_username, chap_password = self._configure_chap(initiator_name)
             self._add_chap_properties(properties, chap_username, chap_password)
@@ -1076,7 +1089,7 @@ class NetAppBlockStorageLibrary(object):
 
         # get WWPNs from controller and strip colons
         all_target_wwpns = self._get_fc_target_wwpns()
-        all_target_wwpns = [six.text_type(wwpn).replace(':', '')
+        all_target_wwpns = [str(wwpn).replace(':', '')
                             for wwpn in all_target_wwpns]
 
         target_wwpns = []

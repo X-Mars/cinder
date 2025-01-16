@@ -16,6 +16,7 @@
 Driver for Dell EMC PowerFlex (formerly named Dell EMC VxFlex OS).
 """
 
+import http.client as http_client
 import math
 from operator import xor
 
@@ -26,8 +27,6 @@ from oslo_log import versionutils
 from oslo_service import loopingcall
 from oslo_utils import excutils
 from oslo_utils import units
-import six
-from six.moves import http_client
 
 from cinder.common import constants
 from cinder import context
@@ -96,9 +95,11 @@ class PowerFlexDriver(driver.VolumeDriver):
           3.5.6 - Fix for Bug #1897598 when volume can be migrated without
                   conversion of its type.
           3.5.7 - Report trim/discard support.
+          3.5.8 - Added Cinder active/active support.
     """
 
-    VERSION = "3.5.7"
+    VERSION = "3.5.8"
+    SUPPORTS_ACTIVE_ACTIVE = True
     # ThirdPartySystems wiki
     CI_WIKI_NAME = "DellEMC_PowerFlex_CI"
 
@@ -430,6 +431,14 @@ class PowerFlexDriver(driver.VolumeDriver):
             self._get_client(secondary=True).remove_volume(remote_vol_id)
 
     def failover_host(self, context, volumes, secondary_id=None, groups=None):
+        active_backend_id, model_updates, group_update_list = (
+            self.failover(context, volumes, secondary_id, groups))
+        self.failover_completed(context, secondary_id)
+        return active_backend_id, model_updates, group_update_list
+
+    def failover(self, context, volumes, secondary_id=None, groups=None):
+        """Like failover but for a host that is clustered."""
+        LOG.info("Invoking failover with target %s.", secondary_id)
         if secondary_id not in self._available_failover_choices:
             msg = (_("Target %(target)s is not valid choice. "
                      "Valid choices: %(choices)s.") %
@@ -463,9 +472,34 @@ class PowerFlexDriver(driver.VolumeDriver):
                                                    failover_status,
                                                    is_failback)
             model_updates.append({"volume_id": volume.id, "updates": updates})
-        self.active_backend_id = secondary_id
-        self.replication_enabled = is_failback
+        LOG.info("Failover host completed.")
         return secondary_id, model_updates, []
+
+    def failover_completed(self, context, active_backend_id=None):
+        """This method is called after failover for clustered backends."""
+        LOG.info("Invoking failover_completed with target %s.",
+                 active_backend_id)
+        if (not active_backend_id
+                or active_backend_id
+                == manager.VolumeManager.FAILBACK_SENTINEL):
+            # failback operation
+            self.active_backend_id = manager.VolumeManager.FAILBACK_SENTINEL
+            self.replication_enabled = True
+        elif (active_backend_id == self.replication_device["backend_id"]
+                or active_backend_id == "failed over"):
+            # failover operation
+            self.active_backend_id = self.replication_device["backend_id"]
+            self.replication_enabled = False
+        else:
+            msg = f"Target {active_backend_id} is not valid."
+            LOG.error(msg)
+            raise exception.InvalidReplicationTarget(reason=msg)
+
+        LOG.info("Failover completion completed: "
+                 "active_backend_id = %s, "
+                 "replication_enabled = %s.",
+                 self.active_backend_id,
+                 self.replication_enabled)
 
     def _failover_replication_cg(self, rcg_name, is_failback):
         """Failover/failback Replication Consistency Group on storage backend.
@@ -903,7 +937,7 @@ class PowerFlexDriver(driver.VolumeDriver):
                     int(max_bandwidth),
                     units.Ki
                 )
-                max_bandwidth = six.text_type(max_bandwidth)
+                max_bandwidth = str(max_bandwidth)
             LOG.info("Max bandwidth: %s.", max_bandwidth)
             bw_per_gb = storage_type.get(QOS_BANDWIDTH_PER_GB)
             LOG.info("Bandwidth per GB: %s.", bw_per_gb)
@@ -917,9 +951,9 @@ class PowerFlexDriver(driver.VolumeDriver):
                                                     MIN_BWS_SCALING_SIZE)
             )
             if max_bandwidth is None or scaled_bw_limit < int(max_bandwidth):
-                return six.text_type(scaled_bw_limit)
+                return str(scaled_bw_limit)
             else:
-                return six.text_type(max_bandwidth)
+                return str(max_bandwidth)
         except ValueError:
             msg = _("None numeric BWS QoS limitation.")
             raise exception.InvalidInput(reason=msg)
@@ -933,14 +967,14 @@ class PowerFlexDriver(driver.VolumeDriver):
         try:
             if iops_per_gb is None:
                 if max_iops is not None:
-                    return six.text_type(max_iops)
+                    return str(max_iops)
                 else:
                     return None
             scaled_iops_limit = size * int(iops_per_gb)
             if max_iops is None or scaled_iops_limit < int(max_iops):
-                return six.text_type(scaled_iops_limit)
+                return str(scaled_iops_limit)
             else:
-                return six.text_type(max_iops)
+                return str(max_iops)
         except ValueError:
             msg = _("None numeric IOPS QoS limitation.")
             raise exception.InvalidInput(reason=msg)
@@ -1242,7 +1276,8 @@ class PowerFlexDriver(driver.VolumeDriver):
 
         self.connector.disconnect_volume(connection_properties, volume)
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id,
+                             disable_sparse=False):
         """Fetch image from image service and write it to volume."""
 
         LOG.info("Copy image %(image_id)s from image service %(service)s "
@@ -1258,7 +1293,8 @@ class PowerFlexDriver(driver.VolumeDriver):
                                      image_id,
                                      self._sio_attach_volume(volume),
                                      BLOCK_SIZE,
-                                     size=volume.size)
+                                     size=volume.size,
+                                     disable_sparse=disable_sparse)
         finally:
             self._sio_detach_volume(volume)
 
@@ -1412,7 +1448,7 @@ class PowerFlexDriver(driver.VolumeDriver):
             "destSPId": dst_pool_id,
             "volTypeConversion": "NoConversion",
             "compressionMethod": "None",
-            "allowDuringRebuild": six.text_type(
+            "allowDuringRebuild": str(
                 self.configuration.powerflex_allow_migration_during_rebuild
             ),
         }

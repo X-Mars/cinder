@@ -19,9 +19,7 @@
 
 """Built-in volume type properties."""
 
-from __future__ import annotations
-
-from typing import Any, Iterable, Optional, Union   # noqa: H301
+from typing import Any, Iterable, Optional, Union
 
 from oslo_config import cfg
 from oslo_db import exception as db_exc
@@ -244,17 +242,10 @@ def get_default_volume_type(
 
 def get_volume_type_extra_specs(
         volume_type_id: str,
-        key: Union[str, bool] = False) -> Union[dict, bool]:
+) -> dict:
     volume_type = get_volume_type(context.get_admin_context(),
                                   volume_type_id)
-    extra_specs = volume_type['extra_specs']
-    if key:
-        if extra_specs.get(key):
-            return extra_specs.get(key)
-        else:
-            return False
-    else:
-        return extra_specs
+    return volume_type['extra_specs']
 
 
 def is_public_volume_type(context: context.RequestContext,
@@ -333,7 +324,7 @@ def remove_volume_type_access(context: context.RequestContext,
 
 
 def is_encrypted(context: context.RequestContext,
-                 volume_type_id: str) -> bool:
+                 volume_type_id: Optional[str]) -> bool:
     return get_volume_type_encryption(context, volume_type_id) is not None
 
 
@@ -453,7 +444,7 @@ def volume_types_diff(context: context.RequestContext,
 
 def volume_types_encryption_changed(
         context: context.RequestContext,
-        vol_type_id1: str, vol_type_id2: str) -> bool:
+        vol_type_id1: Optional[str], vol_type_id2: Optional[str]) -> bool:
     """Return whether encryptions of two volume types are same."""
     def _get_encryption(enc: dict) -> dict:
         enc = dict(enc)

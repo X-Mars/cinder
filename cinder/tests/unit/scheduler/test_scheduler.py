@@ -54,6 +54,10 @@ class SchedulerManagerTestCase(test.TestCase):
     def setUp(self):
         super(SchedulerManagerTestCase, self).setUp()
         self.flags(scheduler_driver=self.driver_cls_name)
+        # the host_manager injected into the scheduler driver is controlled
+        # via configuration
+        self.flags(scheduler_host_manager='cinder.tests.unit.scheduler.fakes.'
+                   'FakeHostManager')
         self.manager = self.manager_cls()
         self.manager._startup_delay = False
         self.context = context.get_admin_context()
@@ -601,7 +605,7 @@ class SchedulerManagerTestCase(test.TestCase):
         self.manager.create_backup(self.context, backup=backup)
 
         mock_save.assert_called_once()
-        mock_host.assert_called_once_with(volume)
+        mock_host.assert_called_once_with(volume, None)
         mock_volume_get.assert_called_once_with(self.context, backup.volume_id)
         mock_create.assert_called_once_with(self.context, backup)
 
@@ -642,7 +646,7 @@ class SchedulerManagerTestCase(test.TestCase):
 
         self.manager.create_backup(self.context, backup=backup)
 
-        mock_host.assert_called_once_with(volume)
+        mock_host.assert_called_once_with(volume, None)
         mock_volume_get.assert_called_once_with(self.context, backup.volume_id)
         mock_volume_update.assert_called_once_with(
             self.context,
@@ -651,6 +655,16 @@ class SchedulerManagerTestCase(test.TestCase):
              'previous_status': 'backing-up'})
         mock_error.assert_called_once_with(
             backup, 'Service not found for creating backup.')
+
+    def test_get_az(self):
+        volume = fake_volume.fake_db_volume()
+        volume['status'] = 'backing-up'
+        volume['previous_status'] = 'available'
+        # this next line looks a little suspect, but the FakeHostManager
+        # is a HostManager and does not override any relevant functions
+        hm = fake_scheduler.FakeHostManager()
+        az = hm.get_az(volume, availability_zone='test_az')
+        self.assertEqual('test_az', az)
 
 
 class SchedulerTestCase(test.TestCase):
@@ -661,6 +675,10 @@ class SchedulerTestCase(test.TestCase):
 
     def setUp(self):
         super(SchedulerTestCase, self).setUp()
+        # the host_manager injected into the scheduler driver is controlled
+        # via configuration
+        self.flags(scheduler_host_manager='cinder.tests.unit.scheduler.fakes.'
+                   'FakeHostManager')
         self.driver = self.driver_cls()
         self.context = context.RequestContext(fake.USER_ID, fake.PROJECT_ID)
         self.topic = 'fake_topic'
@@ -716,6 +734,23 @@ class SchedulerDriverModuleTestCase(test.TestCase):
         driver.volume_update_db(self.context, volume.id, 'fake_host',
                                 'fake_cluster')
         scheduled_at = volume.scheduled_at.replace(tzinfo=None)
+        _mock_volume_get.assert_called_once_with(self.context, volume.id)
+        _mock_vol_update.assert_called_once_with(
+            self.context, volume.id, {'host': 'fake_host',
+                                      'cluster_name': 'fake_cluster',
+                                      'scheduled_at': scheduled_at,
+                                      'availability_zone': None})
+
+    @mock.patch('cinder.db.volume_update')
+    @mock.patch('cinder.objects.volume.Volume.get_by_id')
+    def test_volume_host_update_db_vol_present(self, _mock_volume_get,
+                                               _mock_vol_update):
+        volume = fake_volume.fake_volume_obj(self.context, use_quota=True)
+
+        driver.volume_update_db(self.context, volume.id, 'fake_host',
+                                'fake_cluster', volume=volume)
+        scheduled_at = volume.scheduled_at.replace(tzinfo=None)
+        _mock_volume_get.assert_not_called()
         _mock_vol_update.assert_called_once_with(
             self.context, volume.id, {'host': 'fake_host',
                                       'cluster_name': 'fake_cluster',

@@ -48,7 +48,7 @@ from cinder.volume import volume_utils
 from cinder.zonemanager import utils as fczm_utils
 
 
-DRIVER_VERSION = "4.2.0"
+DRIVER_VERSION = "4.3.0"
 AES_256_XTS_CIPHER = 'aes_256_xts'
 DEFAULT_CIPHER = 'none'
 EXTRA_SPEC_ENCRYPTION = 'nimble:encryption'
@@ -134,6 +134,7 @@ class NimbleBaseVolumeDriver(san.SanDriver):
                 Added consistency groups support
         4.2.0 - The Nimble driver is now located in the
                 cinder.volume.drivers.hpe module.
+        4.3.0 - Added group replication support
     """
     VERSION = DRIVER_VERSION
 
@@ -151,10 +152,15 @@ class NimbleBaseVolumeDriver(san.SanDriver):
         self.verify = False
         if self.configuration.nimble_verify_certificate is True:
             self.verify = self.configuration.nimble_verify_cert_path or True
+        self.APIExecutor_remote_array = None
+        self.remote_array = {}
+        self._replicated_type = False
 
     @staticmethod
     def get_driver_options():
-        return nimble_opts
+        additional_opts = driver.BaseVD._get_oslo_driver_opts(
+            'max_over_subscription_ratio')
+        return nimble_opts + additional_opts
 
     def _check_config(self):
         """Ensure that the flags we care about are set."""
@@ -167,6 +173,7 @@ class NimbleBaseVolumeDriver(san.SanDriver):
     def create_volume(self, volume):
         """Create a new volume."""
         reserve = not self.configuration.san_thin_provision
+        LOG.debug("Creating volume: %(name)s", {'name': volume['name']})
         self.APIExecutor.create_vol(
             volume,
             self.configuration.nimble_pool_name, reserve,
@@ -174,15 +181,24 @@ class NimbleBaseVolumeDriver(san.SanDriver):
             self._group_target_enabled)
         volume_type = volume.get('volume_type')
         consis_group_snap_type = False
+        LOG.debug("volume_type: %(vol_type)s", {'vol_type': volume_type})
+
         if volume_type is not None:
             consis_group_snap_type = self.is_volume_group_snap_type(
                 volume_type)
+            LOG.debug("consis_group_snap_type: %(cg_type)s",
+                      {'cg_type': consis_group_snap_type})
             cg_id = volume.get('group_id', None)
+            LOG.debug("cg_id: %(cg_id)s", {'cg_id': cg_id})
         if consis_group_snap_type and cg_id:
             volume_id = self.APIExecutor.get_volume_id_by_name(volume['name'])
             cg_volcoll_id = self.APIExecutor.get_volcoll_id_by_name(cg_id)
             self.APIExecutor.associate_volcoll(volume_id, cg_volcoll_id)
-        return self._get_model_info(volume['name'])
+
+        model_info = self._get_model_info(volume['name'])
+        if self._replicated_type:
+            model_info['replication_status'] = 'enabled'
+        return model_info
 
     def is_volume_backup_clone(self, volume):
         """check if the volume is created through cinder-backup workflow.
@@ -231,7 +247,23 @@ class NimbleBaseVolumeDriver(san.SanDriver):
         """Delete the specified volume."""
         backup_snap_name, backup_vol_name = self.is_volume_backup_clone(volume)
         eventlet.sleep(DEFAULT_SLEEP)
+
+        if self._replicated_type:
+            group_id = self.APIExecutor_remote_array.get_group_id()
+            LOG.debug("group_id: %(id)s", {'id': group_id})
+            volume_id = self.APIExecutor_remote_array.get_volume_id_by_name(
+                volume['name'])
+            LOG.debug("volume_id: %(id)s", {'id': volume_id})
+
+            LOG.debug("claim vol on remote array")
+            self.APIExecutor_remote_array.claim_vol(volume_id, group_id)
+
+            LOG.debug("delete vol on remote array")
+            self.APIExecutor_remote_array.delete_vol(volume['name'])
+
+        # make the volume as offline
         self.APIExecutor.online_vol(volume['name'], False)
+
         LOG.debug("Deleting volume %(vol)s", {'vol': volume['name']})
 
         @utils.retry(NimbleAPIException, retries=3)
@@ -286,7 +318,7 @@ class NimbleBaseVolumeDriver(san.SanDriver):
                                    self._group_target_enabled,
                                    self._storage_protocol,
                                    pool_name)
-        if(volume['size'] > snapshot['volume_size']):
+        if (volume['size'] > snapshot['volume_size']):
             vol_size = volume['size'] * units.Ki
             reserve_size = 100 if reserve else 0
             data = {"data": {'size': vol_size,
@@ -395,6 +427,8 @@ class NimbleBaseVolumeDriver(san.SanDriver):
                                 'storage_protocol': self._storage_protocol}
             # Just use a single pool for now, FIXME to support multiple
             # pools
+            mor = self.configuration.max_over_subscription_ratio
+            LOG.debug("mor: %(mor)s", {'mor': mor})
             single_pool = dict(
                 pool_name=backend_name,
                 total_capacity_gb=total_capacity,
@@ -402,7 +436,11 @@ class NimbleBaseVolumeDriver(san.SanDriver):
                 reserved_percentage=0,
                 QoS_support=False,
                 multiattach=True,
-                consistent_group_snapshot_enabled=True)
+                max_over_subscription_ratio=mor,
+                thin_provisioning_support=True,
+                consistent_group_snapshot_enabled=True,
+                consistent_group_replication_enabled=self._replicated_type,
+                replication_enabled=self._replicated_type)
             self.group_stats['pools'] = [single_pool]
         return self.group_stats
 
@@ -576,10 +614,38 @@ class NimbleBaseVolumeDriver(san.SanDriver):
         # offline the volume
         self.APIExecutor.online_vol(vol_name, False)
 
+    def _do_replication_setup(self, array_id=None):
+        devices = self.configuration.replication_device
+        if devices:
+            dev = devices[0]
+            remote_array = dict(dev.items())
+            remote_array['san_login'] = (
+                dev.get('ssh_login', self.configuration.san_login))
+            remote_array['san_password'] = (
+                dev.get('san_password', self.configuration.san_password))
+            try:
+                self.APIExecutor_remote_array = NimbleRestAPIExecutor(
+                    username=remote_array['san_login'],
+                    password=remote_array['san_password'],
+                    ip=remote_array['san_ip'],
+                    verify=self.verify)
+                LOG.debug("created APIExecutor for remote ip: %(ip)s",
+                          {'ip': remote_array['san_ip']})
+            except Exception:
+                LOG.error('Failed to create REST client.'
+                          ' Check san_ip, username, password'
+                          ' and make sure the array version is compatible')
+                raise
+
+            self._replicated_type = True
+            self.remote_array = remote_array
+
     def do_setup(self, context):
         """Setup the Nimble Cinder volume driver."""
         self._check_config()
         # Setup API Executor
+        san_ip = self.configuration.san_ip
+        LOG.debug("san_ip: %(ip)s", {'ip': san_ip})
         try:
             self.APIExecutor = NimbleRestAPIExecutor(
                 username=self.configuration.san_login,
@@ -595,6 +661,11 @@ class NimbleBaseVolumeDriver(san.SanDriver):
                       ' and make sure the array version is compatible')
             raise
         self._update_existing_vols_agent_type(context)
+        self._do_replication_setup()
+        if self._replicated_type:
+            LOG.debug("for %(ip)s, schedule_name is: %(name)s",
+                      {'ip': san_ip,
+                       'name': self.remote_array['schedule_name']})
 
     def _update_existing_vols_agent_type(self, context):
         backend_name = self.configuration.safe_get('volume_backend_name')
@@ -787,7 +858,7 @@ class NimbleBaseVolumeDriver(san.SanDriver):
         cg_type = False
         cg_name = group.id
         description = group.description if group.description else group.name
-        LOG.info('Create group: %(name)s, description)s', {'name': cg_name,
+        LOG.info('Create group: %(name)s, %(description)s', {'name': cg_name,
                  'description': description})
         for volume_type in group.volume_types:
             if volume_type:
@@ -803,7 +874,7 @@ class NimbleBaseVolumeDriver(san.SanDriver):
                                 '="<is> True"')
                         LOG.error(msg)
                         raise exception.InvalidInput(reason=msg)
-        self.APIExecutor.create_volcoll(cg_name)
+        self.APIExecutor.create_volcoll(cg_name, description)
         return {'status': fields.GroupStatus.AVAILABLE}
 
     def delete_group(self, context, group, volumes):
@@ -943,6 +1014,168 @@ class NimbleBaseVolumeDriver(san.SanDriver):
             LOG.error(msg)
             raise NimbleAPIException(msg)
         return None, None
+
+    def _time_to_secs(self, time):
+        # time is specified as 'HH:MM' or 'HH:MM:SS'
+        # qualified with am or pm, or in 24-hour clock
+        time = time.strip("'")
+        arr = time.split(':')
+        (hours, minutes) = (arr[0], arr[1])
+        total_secs = 0
+
+        if len(arr) == 2:
+            hours = int(hours)
+            if minutes.endswith('pm'):
+                # for time like 12:01pm, no need to add 12 to hours
+                if hours != 12:
+                    # for other time like 01:05pm, we have add 12 to hours
+                    hours += 12
+                minutes = minutes.strip('pm')
+            if minutes.endswith('am'):
+                minutes = minutes.strip('am')
+            minutes = int(minutes)
+
+            total_secs = hours * 3600 + minutes * 60
+            return total_secs
+
+        if len(arr) == 3:
+            seconds = arr[2]
+            hours = int(hours)
+            minutes = int(minutes)
+
+            if seconds.endswith('pm'):
+                # for time like 12:01:01pm, no need to add 12 to hours
+                if hours != 12:
+                    # for other time like 01:05:05pm, we have add 12 to hours
+                    hours += 12
+                seconds = seconds.strip('pm')
+            if seconds.endswith('am'):
+                seconds = seconds.strip('am')
+            seconds = int(seconds)
+
+            total_secs = hours * 3600 + minutes * 60 + seconds
+            return total_secs
+
+    def enable_replication(self, context, group, volumes):
+        LOG.debug("try to enable repl on group %(group)s", {'group': group.id})
+
+        if not group.is_replicated:
+            raise NotImplementedError()
+
+        model_update = {}
+        try:
+            # If replication is enabled for volume type, apply the schedule
+            nimble_group_name = group.id
+            san_ip = self.configuration.san_ip
+
+            # apply schedule
+            sched_name = self.remote_array['schedule_name']
+            partner_name = self.remote_array['downstream_partner']
+            LOG.debug("for %(ip)s, schedule_name is: %(name)s",
+                      {'ip': san_ip, 'name': sched_name})
+
+            kwargs = {}
+            optionals = ['period', 'period_unit', 'num_retain',
+                         'num_retain_replica', 'at_time', 'until_time',
+                         'days', 'replicate_every', 'alert_threshold']
+            for key in optionals:
+                if key in self.remote_array:
+                    value = self.remote_array[key]
+                    kwargs[key] = value
+
+                    if key == 'at_time' or key == 'until_time':
+                        seconds = self._time_to_secs(value)
+                        kwargs[key] = seconds
+
+            self.APIExecutor.set_schedule_for_volcoll(
+                sched_name, nimble_group_name, partner_name, **kwargs)
+            model_update.update({
+                'replication_status': fields.ReplicationStatus.ENABLED})
+        except Exception as e:
+            model_update.update({
+                'replication_status': fields.ReplicationStatus.ERROR})
+            LOG.error("Error enabling replication on group %(group)s. "
+                      "Exception received: %(e)s.",
+                      {'group': group.id, 'e': e})
+
+        return model_update, None
+
+    def disable_replication(self, context, group, volumes):
+        LOG.debug("try disable repl on group %(group)s", {'group': group.id})
+
+        if not group.is_replicated:
+            raise NotImplementedError()
+
+        model_update = {}
+        try:
+            san_ip = self.configuration.san_ip
+            sched_name = self.remote_array['schedule_name']
+            LOG.debug("for %(ip)s, schedule_name is: %(name)s",
+                      {'ip': san_ip, 'name': sched_name})
+
+            data = self.APIExecutor.get_volcoll_details(group.id)
+            LOG.debug("data: %(data)s", {'data': data})
+            sched_id = data['schedule_list'][0]['id']
+
+            self.APIExecutor.delete_schedule(sched_id)
+            model_update.update({
+                'replication_status': fields.ReplicationStatus.DISABLED})
+        except Exception as e:
+            model_update.update({
+                'replication_status': fields.ReplicationStatus.ERROR})
+            LOG.error("Error disabling replication on group %(group)s. "
+                      "Exception received: %(e)s.",
+                      {'group': group.id, 'e': e})
+
+        return model_update, None
+
+    def failover_replication(self, context, group, volumes,
+                             secondary_backend_id=None):
+        LOG.debug("try to failover/failback group %(group)s to %(backend)s",
+                  {'group': group.id, 'backend': secondary_backend_id})
+
+        group_update = {}
+        volume_update_list = []
+
+        partner_name = secondary_backend_id
+        partner_id = None
+        if partner_name != 'default':
+            LOG.debug("failover to secondary array")
+            partner_id = self.APIExecutor.get_partner_id_by_name(partner_name)
+            LOG.debug("partner_id %(id)s", {'id': partner_id})
+
+            volcoll_id = self.APIExecutor.get_volcoll_id_by_name(group.id)
+            LOG.debug("volcoll_id %(id)s", {'id': volcoll_id})
+
+            self.APIExecutor.handover(volcoll_id, partner_id)
+            rep_status = fields.ReplicationStatus.FAILED_OVER
+
+        if partner_name == 'default':
+            LOG.debug("failback to primary array")
+
+            data = self.APIExecutor_remote_array.get_volcoll_details(group.id)
+            partner_name = data['replication_partner']
+            LOG.debug("partner_name: %(name)s", {'name': partner_name})
+
+            partner_id = self.APIExecutor_remote_array.get_partner_id_by_name(
+                partner_name)
+            LOG.debug("partner_id %(id)s", {'id': partner_id})
+
+            volcoll_id = self.APIExecutor_remote_array.get_volcoll_id_by_name(
+                group.id)
+            LOG.debug("volcoll_id %(id)s", {'id': volcoll_id})
+
+            self.APIExecutor_remote_array.handover(volcoll_id, partner_id)
+            rep_status = fields.ReplicationStatus.ENABLED
+
+        group_update['replication_status'] = rep_status
+        for vol in volumes:
+            volume_update = {
+                'id': vol.id,
+                'replication_status': rep_status}
+            volume_update_list.append(volume_update)
+
+        return group_update, volume_update_list
 
 
 @interface.volumedriver
@@ -1593,7 +1826,7 @@ class NimbleRestAPIExecutor(object):
             LOG.debug("Key %(key)s Value %(value)s",
                       {'key': key, 'value': value})
             if key == EXTRA_SPEC_IOPS_LIMIT and value.isdigit():
-                if type(value) == int or int(value) < MIN_IOPS or (
+                if type(value) is int or int(value) < MIN_IOPS or (
                    int(value) > MAX_IOPS):
                     raise NimbleAPIException(_("%(err)s [%(min)s, %(max)s]") %
                                              {'err': IOPS_ERR_MSG,
@@ -1826,6 +2059,15 @@ class NimbleRestAPIExecutor(object):
                             .format(volcoll_name))
         return r.json()['data'][0]['id']
 
+    def get_volcoll_details(self, volcoll_name):
+        api = "volume_collections/detail"
+        filter = {"name": volcoll_name}
+        r = self.get_query(api, filter)
+        if not r.json()['data']:
+            raise Exception("Unable to retrieve information for volcoll: {0}"
+                            .format(volcoll_name))
+        return r.json()['data'][0]
+
     def get_snapcoll_id_by_name(self, snapcoll_name):
         api = "snapshot_collections"
         filter = {"name": snapcoll_name}
@@ -1835,9 +2077,9 @@ class NimbleRestAPIExecutor(object):
                             .format(snapcoll_name))
         return r.json()['data'][0]['id']
 
-    def create_volcoll(self, volcoll_name):
+    def create_volcoll(self, volcoll_name, description=''):
         api = "volume_collections"
-        data = {"data": {"name": volcoll_name}}
+        data = {"data": {"name": volcoll_name, "description": description}}
         r = self.post(api, data)
         return r['data']
 
@@ -2065,7 +2307,7 @@ class NimbleRestAPIExecutor(object):
             LOG.debug("Key %(key)s Value %(value)s",
                       {'key': key, 'value': value})
             if key == EXTRA_SPEC_IOPS_LIMIT and value.isdigit():
-                if type(value) == int or int(value) < MIN_IOPS or (
+                if type(value) is int or int(value) < MIN_IOPS or (
                    int(value) > MAX_IOPS):
                     raise NimbleAPIException(_("Please enter valid IOPS "
                                                "limit in the range ["
@@ -2185,3 +2427,74 @@ class NimbleRestAPIExecutor(object):
         api = "groups/" + str(group_id)
         data = {'data': {'group_target_enabled': True}}
         self.put(api, data)
+
+    def set_schedule_for_volcoll(self, sched_name, volcoll_name,
+                                 repl_partner,
+                                 period=1,
+                                 period_unit='days',
+                                 num_retain=10,
+                                 num_retain_replica=1,
+                                 at_time=0,           # 00:00
+                                 until_time=86340,    # 23:59
+                                 days='all',
+                                 replicate_every=1,
+                                 alert_threshold='24:00'):
+        volcoll_id = self.get_volcoll_id_by_name(volcoll_name)
+        api = "protection_schedules"
+
+        sched_details = {'name': sched_name,
+                         'volcoll_or_prottmpl_type': "volume_collection",
+                         'volcoll_or_prottmpl_id': volcoll_id,
+                         'downstream_partner': repl_partner,
+                         'period': period,
+                         'period_unit': period_unit,
+                         'num_retain': num_retain,
+                         'num_retain_replica': num_retain_replica}
+
+        if at_time != 0:
+            sched_details['at_time'] = at_time
+        if until_time != 86340:
+            sched_details['until_time'] = until_time
+        if days != 'all':
+            sched_details['days'] = days
+        if replicate_every != 1:
+            sched_details['replicate_every'] = replicate_every
+        if alert_threshold != '24:00':
+            sched_details['alert_threshold'] = alert_threshold
+
+        data = {'data': sched_details}
+
+        r = self.post(api, data)
+        return r['data']
+
+    def delete_schedule(self, sched_id):
+        api = "protection_schedules/" + str(sched_id)
+        self.delete(api)
+
+    def claim_vol(self, volume_id, group_id):
+        api = "volumes/" + str(volume_id)
+        group_id = str(group_id)
+        data = {'data': {"owned_by_group_id": group_id
+                         }
+                }
+        r = self.put(api, data)
+        return r
+
+    def get_partner_id_by_name(self, partner_name):
+        api = "replication_partners"
+        filter = {"name": partner_name}
+        r = self.get_query(api, filter)
+        if not r.json()['data']:
+            raise Exception("Unable to retrieve information for partner: {0}"
+                            .format(partner_name))
+        return r.json()['data'][0]['id']
+
+    def handover(self, volcoll_id, partner_id):
+        volcoll_id = str(volcoll_id)
+        partner_id = str(partner_id)
+        api = "volume_collections/" + volcoll_id + "/actions/handover"
+        data = {'data': {"id": volcoll_id,
+                         "replication_partner_id": partner_id
+                         }
+                }
+        self.post(api, data)

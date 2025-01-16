@@ -31,7 +31,6 @@ from oslo_utils import excutils
 from oslo_utils import strutils
 from oslo_utils import units
 import paramiko
-import six
 
 from cinder import context
 from cinder import exception
@@ -409,7 +408,7 @@ class StorwizeSSH(object):
         if cycle_period_seconds:
             ssh_cmd = ['svctask', 'chrcrelationship']
             ssh_cmd.extend(['-cycleperiodseconds',
-                            six.text_type(cycle_period_seconds)])
+                            str(cycle_period_seconds)])
             ssh_cmd.append(relationship)
             self.run_ssh_assert_no_output(ssh_cmd)
 
@@ -501,16 +500,15 @@ class StorwizeSSH(object):
 
     def mkippartnership(self, ip_v4, bandwidth=1000, backgroundcopyrate=50):
         ssh_cmd = ['svctask', 'mkippartnership', '-type', 'ipv4',
-                   '-clusterip', ip_v4, '-linkbandwidthmbits',
-                   six.text_type(bandwidth),
-                   '-backgroundcopyrate', six.text_type(backgroundcopyrate)]
+                   '-clusterip', ip_v4, '-linkbandwidthmbits', str(bandwidth),
+                   '-backgroundcopyrate', str(backgroundcopyrate)]
         return self.run_ssh_assert_no_output(ssh_cmd)
 
     def mkfcpartnership(self, system_name, bandwidth=1000,
                         backgroundcopyrate=50):
         ssh_cmd = ['svctask', 'mkfcpartnership', '-linkbandwidthmbits',
-                   six.text_type(bandwidth),
-                   '-backgroundcopyrate', six.text_type(backgroundcopyrate),
+                   str(bandwidth),
+                   '-backgroundcopyrate', str(backgroundcopyrate),
                    system_name]
         return self.run_ssh_assert_no_output(ssh_cmd)
 
@@ -650,7 +648,7 @@ class StorwizeSSH(object):
 
     def mkvdisk(self, name, size, units, pool, opts, params):
         ssh_cmd = ['svctask', 'mkvdisk', '-name', '"%s"' % name, '-mdiskgrp',
-                   '"%s"' % pool, '-iogrp', six.text_type(opts['iogrp']),
+                   '"%s"' % pool, '-iogrp', str(opts['iogrp']),
                    '-size', size, '-unit', units] + params
         try:
             return self.run_ssh_check_created(ssh_cmd)
@@ -721,7 +719,7 @@ class StorwizeSSH(object):
 
     def expandvdisksize(self, vdisk, amount):
         ssh_cmd = (
-            ['svctask', 'expandvdisksize', '-size', six.text_type(amount),
+            ['svctask', 'expandvdisksize', '-size', str(amount),
              '-unit', 'gb', '"%s"' % vdisk])
         self.run_ssh_assert_no_output(ssh_cmd)
 
@@ -732,7 +730,7 @@ class StorwizeSSH(object):
         if not full_copy:
             ssh_cmd.extend(['-copyrate', '0'])
         else:
-            ssh_cmd.extend(['-copyrate', six.text_type(copy_rate)])
+            ssh_cmd.extend(['-copyrate', str(copy_rate)])
             ssh_cmd.append('-autodelete')
         if consistgrp:
             ssh_cmd.extend(['-consistgrp', consistgrp])
@@ -1462,8 +1460,8 @@ class StorwizeHelpers(object):
         # Before we start, make sure host name is a string and that we have at
         # least one port.
         host_name = connector['host']
-        if not isinstance(host_name, six.string_types):
-            msg = _('create_host: Host name is not unicode or string.')
+        if not isinstance(host_name, str):
+            msg = _('create_host: Host name is not a string.')
             LOG.error(msg)
             raise exception.VolumeDriverException(message=msg)
 
@@ -1484,7 +1482,7 @@ class StorwizeHelpers(object):
             raise exception.VolumeDriverException(message=msg)
 
         # Build a host name for the Storwize host - first clean up the name
-        if isinstance(host_name, six.text_type):
+        if isinstance(host_name, str):
             host_name = unicodedata.normalize('NFKD', host_name).encode(
                 'ascii', 'replace').decode('ascii')
 
@@ -2060,7 +2058,7 @@ class StorwizeHelpers(object):
         else:
             params.extend(['-buffersize', '%s%%' % str(opts['rsize']),
                            '-warning',
-                           '%s%%' % six.text_type(opts['warning'])])
+                           '%s%%' % str(opts['warning'])])
             if not opts['autoexpand']:
                 params.append('-noautoexpand')
             if opts['compression']:
@@ -2068,7 +2066,7 @@ class StorwizeHelpers(object):
             else:
                 params.append('-thin')
                 params.extend(['-grainsize',
-                               six.text_type(opts['grainsize'])])
+                               str(opts['grainsize'])])
         return params
 
     def create_hyperswap_volume(self, vol_name, size, units, pool, opts):
@@ -2080,8 +2078,7 @@ class StorwizeHelpers(object):
                 self.check_data_reduction_pool_params(opts)
             params = self._get_hyperswap_volume_create_params(opts, is_dr_pool)
         hyperpool = '%s:%s' % (pool, opts['peer_pool'])
-        self.ssh.mkvolume(vol_name, six.text_type(size), units,
-                          hyperpool, params)
+        self.ssh.mkvolume(vol_name, str(size), units, hyperpool, params)
 
     def convert_volume_to_hyperswap(self, vol_name, opts, state):
         vol_name = '%s' % vol_name
@@ -2421,7 +2418,7 @@ class StorwizeHelpers(object):
             # update flashcopy rate for clone volume
             if copy_rate != '0' and attrs['rc_controlled'] != 'yes':
                 self.ssh.chfcmap(map_id,
-                                 copyrate=six.text_type(new_flashcopy_rate))
+                                 copyrate=str(new_flashcopy_rate))
 
     def run_flashcopy(self, source, target, timeout, copy_rate,
                       clean_rate, full_copy=True, restore=False):
@@ -2674,10 +2671,11 @@ class StorwizeHelpers(object):
             rcrel = vol_attrs['RC_name']
         self.ssh.startrcrelationship(rcrel, primary)
 
-    def stop_relationship(self, volume_name, access=False):
-        vol_attrs = self.get_vdisk_attributes(volume_name)
-        if vol_attrs['RC_name']:
-            self.ssh.stoprcrelationship(vol_attrs['RC_name'], access=access)
+    def stop_relationship(self, volume_name, access=False, rcrel=None):
+        if rcrel is None:
+            vol_attrs = self.get_vdisk_attributes(volume_name)
+            rcrel = vol_attrs['RC_name']
+        self.ssh.stoprcrelationship(rcrel, access=access)
 
     def create_relationship(self, master, aux, system, asyncmirror,
                             cyclingmode=False, masterchange=None,
@@ -2749,10 +2747,11 @@ class StorwizeHelpers(object):
         self.ssh.ch_rcconsistgrp_cyclingmode(rccg_name,
                                              cyclingmode)
 
-    def delete_relationship(self, volume_name):
-        vol_attrs = self.get_vdisk_attributes(volume_name)
-        if vol_attrs['RC_name']:
-            self.ssh.rmrcrelationship(vol_attrs['RC_name'], True)
+    def delete_relationship(self, volume_name, rcrel=None):
+        if rcrel is None:
+            vol_attrs = self.get_vdisk_attributes(volume_name)
+            rcrel = vol_attrs['RC_name']
+        self.ssh.rmrcrelationship(rcrel, True)
 
     def get_relationship_info(self, volume_name):
         vol_attrs = self.get_vdisk_attributes(volume_name)
@@ -2798,7 +2797,8 @@ class StorwizeHelpers(object):
         try:
             # If relationship exists, will delete the relationship.
             if rel_info:
-                self.delete_relationship(volume_name)
+                self.delete_relationship(volume_name,
+                                         rcrel=rel_info['name'])
             # Delete change volume
             self.delete_vdisk(
                 storwize_const.REPLICA_CHG_VOL_PREFIX + volume_name,
@@ -3312,7 +3312,7 @@ class CLIResponse(object):
             vs = []
             for k in keys:
                 v = a.get(k, None)
-                if isinstance(v, six.string_types) or v is None:
+                if isinstance(v, str) or v is None:
                     v = [v]
                 if isinstance(v, list):
                     vs.append(v)
@@ -3347,7 +3347,7 @@ class CLIResponse(object):
                 else:
                     yield []
 
-        if isinstance(self.raw, six.string_types):
+        if isinstance(self.raw, str):
             stdout, stderr = self.raw, ''
         else:
             stdout, stderr = self.raw
@@ -4214,6 +4214,7 @@ class StorwizeSVCCommonDriver(san.SanDriver,
                         'not recommended.')
             rep_type = rel_info['copy_type']
             cyclingmode = rel_info['cycling_mode']
+            rc_name = rel_info['name']
             master_helper = self._master_backend_helpers
             target_helper = self._aux_backend_helpers
             if rep_type == 'activeactive':
@@ -4262,10 +4263,12 @@ class StorwizeSVCCommonDriver(san.SanDriver,
                                 rccg_name)
                             master_helper.start_rccg(rccg_name)
                         else:
-                            master_helper.stop_relationship(volume.name)
+                            master_helper.stop_relationship(volume.name,
+                                                            rcrel=rc_name)
                             master_helper.change_relationship_cyclingmode(
-                                volume.name)
-                            master_helper.start_relationship(volume.name)
+                                volume.name, rcrel=rc_name)
+                            master_helper.start_relationship(volume.name,
+                                                             rcrel=rc_name)
 
                         tgt_change_vol = (
                             storwize_const.REPLICA_CHG_VOL_PREFIX + tgt_vol)
@@ -4347,7 +4350,7 @@ class StorwizeSVCCommonDriver(san.SanDriver,
         target_helper = self._aux_backend_helpers
         tgt_change_vol = (storwize_const.REPLICA_CHG_VOL_PREFIX + target_vol)
         src_change_vol = (storwize_const.REPLICA_CHG_VOL_PREFIX + volume.name)
-
+        rc_name = rel_info['name']
         # Create source change volume if it doesn't exist
         src_attr = master_helper.get_vdisk_attributes(volume.name)
         src_change_attr = master_helper.get_vdisk_attributes(src_change_vol)
@@ -4379,33 +4382,34 @@ class StorwizeSVCCommonDriver(san.SanDriver,
             master_helper.change_consistgrp_cyclingmode(rccg_name, 'multi')
         else:
             # Update volume cyclingmode to 'multi'
-            master_helper.stop_relationship(volume.name)
-            master_helper.change_relationship_cyclingmode(volume.name, 'multi')
+            master_helper.stop_relationship(volume.name, rcrel=rc_name)
+            master_helper.change_relationship_cyclingmode(volume.name, 'multi',
+                                                          rc_name)
 
         # Set source_change_volume and target_change_volume
         if rel_info["master_vdisk_name"] == volume.name:
             master_helper.change_relationship_changevolume(volume.name,
                                                            src_change_vol,
-                                                           True)
+                                                           True, rc_name)
             target_helper.change_relationship_changevolume(target_vol,
                                                            tgt_change_vol,
-                                                           False)
+                                                           False, rc_name)
         else:
             # Auxiliary volume is onboarded as source volume
             # [Reverse Replication Scenario]
             master_helper.change_relationship_changevolume(volume.name,
                                                            src_change_vol,
-                                                           False)
+                                                           False, rc_name)
             target_helper.change_relationship_changevolume(target_vol,
                                                            tgt_change_vol,
-                                                           True)
+                                                           True, rc_name)
 
         if rccg_name:
             # Start gmcv consistency group relationshi
             master_helper.start_rccg(rccg_name)
         else:
             # Start gmcv volume relationship
-            master_helper.start_relationship(volume.name)
+            master_helper.start_relationship(volume.name, rcrel=rc_name)
 
     def _qos_model_update(self, model_update, volume):
         """add volume wwn and IOThrottle_rate to the metadata of the volume"""
@@ -4435,7 +4439,7 @@ class StorwizeSVCCommonDriver(san.SanDriver,
             if 'IOThrottle_rate' in model_update['metadata']:
                 del model_update['metadata']['IOThrottle_rate']
         model_update['host'] = volume['host']
-        return(model_update)
+        return (model_update)
 
     def add_vdisk_copy(self, volume, dest_pool, vol_type, auto_delete=False):
         return self._helpers.add_vdisk_copy(volume, dest_pool,
@@ -4754,10 +4758,14 @@ class StorwizeSVCCommonDriver(san.SanDriver,
                         [storwize_const.REP_CONSIS_SYNC,
                          storwize_const.REP_CONSIS_COPYING]):
                     if rep_info['primary'] == 'master':
-                        self._helpers.start_relationship(tgt_volume)
+                        self._helpers.start_relationship(tgt_volume,
+                                                         rcrel=
+                                                         rep_info['name'])
                     else:
                         self._helpers.start_relationship(tgt_volume,
-                                                         primary='aux')
+                                                         primary='aux',
+                                                         rcrel=
+                                                         rep_info['name'])
             except Exception as ex:
                 LOG.warning('Fail to copy data from aux to master. master:'
                             ' %(master)s and aux %(aux)s. Please '
@@ -5996,7 +6004,7 @@ class StorwizeSVCCommonDriver(san.SanDriver,
                     volume['volume_type_id'],
                     volume_metadata=volume.get('volume_metadata'))
                 # Check cycle_period_seconds
-                rep_cps = six.text_type(rep_opts.get('cycle_period_seconds'))
+                rep_cps = str(rep_opts.get('cycle_period_seconds'))
             if rel_info['cycle_period_seconds'] != rep_cps:
                 msg = (_("Failed to manage existing volume due to "
                          "the cycle_period_seconds %(vol_cps)s of "
@@ -7019,7 +7027,8 @@ class StorwizeSVCCommonDriver(san.SanDriver,
                     model_update['status'] = fields.GroupStatus.ERROR
                 else:
                     if rccg and rccg.get('cycling_mode', None) == 'multi':
-                        self._helpers.stop_relationship(vol_name)
+                        self._helpers.stop_relationship(vol_name,
+                                                        rcrel=rcrel['name'])
                         rcrel = self._helpers.get_relationship_info(vol_name)
                         if (rccg['state'] != 'empty' and
                            rccg['state'] != 'consistent_stopped' or
@@ -7060,7 +7069,8 @@ class StorwizeSVCCommonDriver(san.SanDriver,
                                    rccg['cycle_period_seconds']})
                         # This rcrel updation failed ,it has to be started
                         # explicitly.
-                        self._helpers.start_relationship(vol_name)
+                        self._helpers.start_relationship(vol_name,
+                                                         rcrel=rcrel['name'])
                         model_update['status'] = fields.GroupStatus.ERROR
                     else:
                         self._helpers.chrcrelationship(rcrel['name'],

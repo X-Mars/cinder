@@ -65,6 +65,8 @@ Request
    - project_id: project_id_path
    - all_tenants: all-tenants
    - sort: sort
+   - sort_key: sort_key
+   - sort_dir: sort_dir
    - limit: limit
    - offset: offset
    - marker: marker
@@ -104,7 +106,7 @@ Response Parameters
 Response Example
 ----------------
 
-.. literalinclude:: ./samples/backups-list-detailed-response.json
+.. literalinclude:: ./samples/backups/backups-list-detailed-response.json
    :language: javascript
 
 
@@ -164,7 +166,7 @@ Response Parameters
 Response Example
 ----------------
 
-.. literalinclude:: ./samples/backup-show-response.json
+.. literalinclude:: ./samples/backups/backup-show-response.json
    :language: javascript
 
 
@@ -356,7 +358,7 @@ Request
 Request Example
 ---------------
 
-.. literalinclude:: ./samples/backup-update-request.json
+.. literalinclude:: ./samples/backups/v3.9/backup-update-request.json
    :language: javascript
 
 Response Parameters
@@ -373,7 +375,7 @@ Response Parameters
 Response Example
 ----------------
 
-.. literalinclude:: ./samples/backup-update-response.json
+.. literalinclude:: ./samples/backups/v3.9/backup-update-response.json
    :language: javascript
 
 
@@ -405,7 +407,10 @@ Request
    - project_id: project_id_path
    - all_tenants: all-tenants
    - sort: sort
+   - sort_key: sort_key
+   - sort_dir: sort_dir
    - limit: limit
+   - offset: offset
    - marker: marker
    - with_count: with_count
 
@@ -424,7 +429,7 @@ Response Parameters
 Response Example
 ----------------
 
-.. literalinclude:: ./samples/backups-list-response.json
+.. literalinclude:: ./samples/backups/backups-list-response.json
    :language: javascript
 
 

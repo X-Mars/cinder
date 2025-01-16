@@ -1,4 +1,4 @@
-# Copyright (C) 2020, 2023, Hitachi, Ltd.
+# Copyright (C) 2020, 2024, Hitachi, Ltd.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -24,8 +24,9 @@ from oslo_utils import units
 
 from cinder import exception
 from cinder import utils as cinder_utils
+from cinder.volume import volume_types
 
-VERSION = '2.3.5'
+VERSION = '2.4.0'
 CI_WIKI_NAME = 'Hitachi_VSP_CI'
 PARAM_PREFIX = 'hitachi'
 VENDOR_NAME = 'Hitachi'
@@ -57,6 +58,9 @@ ERROR_SUFFIX = 'E'
 PORT_ID_LENGTH = 5
 
 BUSY_MESSAGE = "Device or resource is busy."
+
+QOS_KEYS = ['upperIops', 'upperTransferRate',
+            'lowerIops', 'lowerTransferRate', 'responsePriority']
 
 
 @enum.unique
@@ -251,6 +255,14 @@ class HBSDMsg(enum.Enum):
         'loglevel': base_logging.WARNING,
         'msg': 'Port %(port)s will not be used because it is not considered '
                'to be active by the Fibre Channel Zone Manager.',
+        'suffix': WARNING_SUFFIX,
+    }
+    SKIP_DELETING_LDEV = {
+        'msg_id': 348,
+        'loglevel': base_logging.WARNING,
+        'msg': 'Skip deleting the LDEV and its LUNs and pairs because the '
+               'LDEV is used by another object. (%(obj)s: %(obj_id)s, LDEV: '
+               '%(ldev)s, LDEV label: %(ldev_label)s)',
         'suffix': WARNING_SUFFIX,
     }
     STORAGE_COMMAND_FAILED = {
@@ -778,6 +790,57 @@ def synchronized_on_copy_group():
             return _inner()
         return inner
     return wrap
+
+
+def get_qos_specs_from_volume(target):
+    """Return a dictionary of the QoS specs of the target.
+
+    :param target: Volume or Snapshot whose QoS specs are queried.
+    :type target: Volume or Snapshot
+    :return: QoS specs.
+    :rtype: dict
+    """
+    # If the target is a Volume, volume_type is volume.volume_type.
+    # If the target is a Snapshot, volume_type is snapshot.volume.volume_type.
+    # We combine these into "getattr(target, 'volume', target).volume_type)".
+    return get_qos_specs_from_volume_type(
+        getattr(target, 'volume', target).volume_type)
+
+
+def get_qos_specs_from_volume_type(volume_type):
+    """Return a dictionary of the QoS specs of the volume_type.
+
+    :param volume_type: VolumeType whose QoS specs are queried. This must not
+    be None.
+    :type volume_type: VolumeType
+    :return: QoS specs.
+    :rtype: dict
+    The following is an example of the returned value:
+    {'lowerTransferRate': 7,
+     'responsePriority': 2,
+     'upperIops': 456}
+    """
+    qos = {}
+    specs = volume_types.get_volume_type_qos_specs(volume_type.id)['qos_specs']
+    # The following is an example of the specs:
+    # {'consumer': 'back-end',
+    #  'created_at': datetime.datetime(2024, 9, 2, 3, 11, 1),
+    #  'id': '81058c04-06eb-49d7-9199-7016785bf386',
+    #  'name': 'qos1',
+    #  'specs': {'lowerTransferRate': '7',
+    #            'responsePriority': '2',
+    #            'upperIops': '456'}}
+    if specs is None:
+        return qos
+    if 'consumer' in specs and specs['consumer'] not in ('back-end', 'both'):
+        return qos
+    for key in specs['specs'].keys():
+        if key in QOS_KEYS:
+            if specs['specs'][key].isdigit():
+                qos[key] = int(specs['specs'][key])
+            else:
+                qos[key] = specs['specs'][key]
+    return qos
 
 
 DICT = '_dict'

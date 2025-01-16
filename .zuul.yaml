@@ -22,7 +22,8 @@
               - ^cinder/tests/unit.*$
               - ^doc/.*$
               - ^releasenotes/.*$
-        - openstack-tox-functional-py310:
+              - ^reno.yaml$
+        - openstack-tox-functional-py311:
             irrelevant-files: *functional-irrelevant-files
         - cinder-rally-task:
             voting: false
@@ -38,6 +39,7 @@
               - ^cinder/tests/unit.*$
               - ^doc/.*$
               - ^releasenotes/.*$
+              - ^reno.yaml$
         - cinder-plugin-ceph-tempest:
             irrelevant-files: &gate-irrelevant-files
               - ^(test-|)requirements.txt$
@@ -50,6 +52,7 @@
               - ^cinder/tests/unit.*$
               - ^doc/.*$
               - ^releasenotes/.*$
+              - ^reno.yaml$
               - ^setup.cfg$
               - ^tools/.*$
               - ^tox.ini$
@@ -57,9 +60,25 @@
             voting: false
             irrelevant-files: *gate-irrelevant-files
         - cinder-tempest-plugin-lvm-lio-barbican:
-            irrelevant-files: *gate-irrelevant-files
+            # NOTE: we use this as a canary job to make sure at least
+            # one expensive tempest job is run on changes excluded by
+            # the gate-irrelevant-files defined above
+            irrelevant-files:
+              - ^.*\.rst$
+              - ^api-ref/.*$
+              - ^cinder/cmd/status\.py$
+              - ^cinder/locale/.*$
+              - ^cinder/tests/functional.*$
+              - ^cinder/tests/hacking/.*$
+              - ^cinder/tests/unit.*$
+              - ^doc/.*$
+              - ^releasenotes/.*$
+              - ^reno.yaml$
+              - ^tools/.*$
         - cinder-tempest-plugin-lvm-lio-barbican-fips:
             voting: false
+            irrelevant-files: *gate-irrelevant-files
+        - cinder-tempest-plugin-protection-functional:
             irrelevant-files: *gate-irrelevant-files
         - cinder-grenade-mn-sub-volbak:
             irrelevant-files: *gate-irrelevant-files
@@ -78,6 +97,8 @@
             irrelevant-files: *gate-irrelevant-files
         - tempest-integrated-storage:
             irrelevant-files: *gate-irrelevant-files
+        - tempest-integrated-storage-ubuntu-jammy:
+            irrelevant-files: *gate-irrelevant-files
         - grenade:
             irrelevant-files: *gate-irrelevant-files
         - grenade-skip-level:
@@ -86,8 +107,6 @@
             irrelevant-files: *gate-irrelevant-files
         - openstacksdk-functional-devstack:
             irrelevant-files: *gate-irrelevant-files
-        - cinder-tox-py311:
-            voting: false
     gate:
       jobs:
         - cinder-grenade-mn-sub-volbak:
@@ -95,6 +114,8 @@
         - cinder-plugin-ceph-tempest:
             irrelevant-files: *gate-irrelevant-files
         - tempest-integrated-storage:
+            irrelevant-files: *gate-irrelevant-files
+        - tempest-integrated-storage-ubuntu-jammy:
             irrelevant-files: *gate-irrelevant-files
         - grenade:
             irrelevant-files: *gate-irrelevant-files
@@ -114,6 +135,15 @@
             irrelevant-files: *gate-irrelevant-files
         - tempest-pg-full:
             irrelevant-files: *gate-irrelevant-files
+
+# TODO(gmann): As per the 2025.1 testing runtime, we need to run at least
+# one job on jammy. This job can be removed as per the future testing
+# runtime (whenever we start testing Ubuntu 26.04 as default version).
+- job:
+    name: tempest-integrated-storage-ubuntu-jammy
+    description: This is integrated storage job testing on Ubuntu jammy(22.04)
+    parent: tempest-integrated-storage
+    nodeset: openstack-single-node-jammy
 
 - job:
     # Security testing for known issues
@@ -138,6 +168,7 @@
       - ^cinder/locale/.*$
       - ^doc/.*$
       - ^releasenotes/.*$
+      - ^reno.yaml$
       - ^setup.cfg$
       - ^tools/.*$
       - ^tox.ini$
@@ -161,16 +192,14 @@
     name: cinder-plugin-ceph-tempest
     parent: devstack-plugin-ceph-tempest-py3
     roles:
-      - zuul: opendev.org/openstack/cinderlib
       - zuul: opendev.org/openstack/cinder-tempest-plugin
-    run: playbooks/tempest-and-cinderlib-run.yaml
-    post-run: playbooks/post-cinderlib.yaml
-    required-projects:
-      - opendev.org/openstack/cinderlib
     vars:
+      # FIXME: change I29b1af0a4034decad to tempest added image format tests that
+      # cannot pass in this job because the image data takes a optimized path that
+      # bypasses nova's checks.  Until the nova team decides on a strategy to handle
+      # this issue, we skip these tests.
+      tempest_exclude_regex: (tempest.api.image.v2.test_images_formats.ImagesFormatTest.test_compute_rejects)
       configure_swap_size: 4096
-      zuul_additional_subunit_dirs:
-        - "{{ ansible_user_dir }}/{{ zuul.projects['opendev.org/openstack/cinderlib'].src_dir }}"
       devstack_localrc:
         CEPH_MIN_CLIENT_VERSION: "mimic"
         # NOTE: if jobs are having memory problems, may want
@@ -198,16 +227,9 @@
     name: cinder-plugin-ceph-tempest-mn-aa
     parent: devstack-plugin-ceph-multinode-tempest-py3
     roles:
-      - zuul: opendev.org/openstack/cinderlib
       - zuul: opendev.org/openstack/cinder-tempest-plugin
-    run: playbooks/tempest-and-cinderlib-run.yaml
-    post-run: playbooks/post-cinderlib.yaml
-    required-projects:
-      - opendev.org/openstack/cinderlib
     vars:
       configure_swap_size: 4096
-      zuul_additional_subunit_dirs:
-        - "{{ ansible_user_dir }}/{{ zuul.projects['opendev.org/openstack/cinderlib'].src_dir }}"
       devstack_localrc:
         TEMPEST_VOLUME_REVERT_TO_SNAPSHOT: True
         # NOTE: if jobs are having memory problems, may want
@@ -364,12 +386,3 @@
           $TEMPEST_CONFIG:
             volume:
               build_timeout: 900
-
-- job:
-    # copied from cinderlib
-    name: cinder-tox-py311
-    parent: openstack-tox
-    nodeset: ubuntu-jammy
-    vars:
-        tox_envlist: py311
-        python_version: '3.11'

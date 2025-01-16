@@ -35,13 +35,11 @@ The Dell PowerFlex Block Storage driver has been tested against the
 following versions of VxFlex OS and PowerFlex and found to be
 compatible:
 
-* VxFlex OS 3.0.x
-
-* PowerFlex 3.5.x
-
 * PowerFlex 3.6.0
 
 * PowerFlex 4.0.x
+
+* PowerFlex 4.5.x
 
 Please consult the :ref:`powerflex_docs`
 to determine supported operating systems for each version
@@ -87,6 +85,8 @@ Supported operations
 * Create, list, update, and delete consistency group snapshots
 
 * OpenStack replication v2.1 support
+
+* Cinder volume active/active support
 
 PowerFlex Block Storage driver configuration
 --------------------------------------------

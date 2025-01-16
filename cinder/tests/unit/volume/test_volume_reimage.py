@@ -46,7 +46,8 @@ class VolumeReimageTestCase(base.BaseVolumeTestCase):
             self.volume.reimage(self.context, volume, self.image_meta)
             mock_cp_img.assert_called_once_with(self.context, volume,
                                                 fake_image.FakeImageService(),
-                                                self.image_meta['id'])
+                                                self.image_meta['id'],
+                                                disable_sparse=True)
         self.assertEqual(volume.status, 'available')
 
     def test_volume_reimage_raise_exception(self):
@@ -107,6 +108,22 @@ class VolumeReimageTestCase(base.BaseVolumeTestCase):
         mock_check.assert_called_once_with(self.image_meta, volume.size)
         mock_reimage.assert_called_once_with(self.context, volume,
                                              self.image_meta)
+
+    @mock.patch('cinder.volume.volume_utils.check_image_metadata')
+    @mock.patch('cinder.volume.rpcapi.VolumeAPI.reimage')
+    @ddt.data('available', 'error')
+    def test_volume_reimage_check_meta_exception(self, status, mock_reimage,
+                                                 mock_check):
+        volume = tests_utils.create_volume(self.context)
+        volume.status = status
+        volume.save()
+        self.assertEqual(volume.status, status)
+        mock_check.side_effect = exception.ImageUnacceptable(
+            image_id=self.image_meta['id'], reason='')
+        # The available or error volume can be reimaged directly
+        self.assertRaises(exception.ImageUnacceptable, self.volume_api.reimage,
+                          self.context, volume, self.image_meta['id'])
+        self.assertEqual(status, volume.status)
 
     @mock.patch('cinder.volume.volume_utils.check_image_metadata')
     @mock.patch('cinder.volume.rpcapi.VolumeAPI.reimage')

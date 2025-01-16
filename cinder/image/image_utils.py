@@ -23,8 +23,6 @@ Some slight modifications, but at some point
 we should look at maybe pushing this up to Oslo
 """
 
-from __future__ import annotations  # Remove when only supporting python 3.9+
-
 import contextlib
 import errno
 import io
@@ -32,7 +30,7 @@ import math
 import os
 import re
 import tempfile
-from typing import ContextManager, Generator, Optional  # noqa: H301
+from typing import ContextManager, Generator, Optional
 
 import cryptography
 from cursive import exception as cursive_exception
@@ -52,6 +50,7 @@ from cinder import exception
 from cinder.i18n import _
 from cinder.image import accelerator
 from cinder.image import glance
+import cinder.privsep.format_inspector
 from cinder import utils
 from cinder.volume import throttling
 from cinder.volume import volume_utils
@@ -103,9 +102,9 @@ image_opts = [
                      'an operator has configured glance property protections '
                      'to make some image properties read-only. Cinder will '
                      '*always* filter out image metadata in the namespaces '
-                     '`os_glance` and `img_signature`; this configuration '
-                     'option allows operators to specify *additional* '
-                     'namespaces to be excluded.',
+                     '`os_glance`, `img_signature` and `signature_verified`; '
+                     'this configuration option allows operators to specify '
+                     '*additional* namespaces to be excluded.',
                 default=[]),
 ]
 
@@ -129,7 +128,8 @@ QEMU_IMG_VERSION = None
 
 COMPRESSIBLE_IMAGE_FORMATS = ('qcow2',)
 
-GLANCE_RESERVED_NAMESPACES = ["os_glance", "img_signature"]
+GLANCE_RESERVED_NAMESPACES = ["os_glance", "img_signature",
+                              "signature_verified"]
 
 
 def validate_stores_id(context: context.RequestContext,
@@ -158,11 +158,26 @@ def from_qemu_img_disk_format(disk_format: str) -> str:
     return QEMU_IMG_FORMAT_MAP_INV.get(disk_format, disk_format)
 
 
-def qemu_img_info(path: str,
-                  run_as_root: bool = True,
-                  force_share: bool = False) -> imageutils.QemuImgInfo:
+def qemu_img_info(
+        path: str,
+        run_as_root: bool = True,
+        force_share: bool = False,
+        allow_qcow2_backing_file: bool = False) -> imageutils.QemuImgInfo:
     """Return an object containing the parsed output from qemu-img info."""
-    cmd = ['env', 'LC_ALL=C', 'qemu-img', 'info', '--output=json']
+
+    format_name = cinder.privsep.format_inspector.get_format_if_safe(
+        path=path,
+        allow_qcow2_backing_file=allow_qcow2_backing_file)
+    if format_name is None:
+        LOG.warning('Image/Volume %s failed safety check', path)
+        # NOTE(danms): This is the same exception as would be raised
+        # by qemu_img_info() if the disk format was unreadable or
+        # otherwise unsuitable.
+        raise exception.Invalid(
+            reason=_('Image/Volume failed safety check'))
+
+    cmd = ['env', 'LC_ALL=C', 'qemu-img', 'info',
+           '-f', format_name, '--output=json']
     if force_share:
         cmd.append('--force-share')
     cmd.append(path)
@@ -173,8 +188,32 @@ def qemu_img_info(path: str,
                               prlimit=QEMU_IMG_LIMITS)
     info = imageutils.QemuImgInfo(out, format='json')
 
+    # FIXME: figure out a more elegant way to do this
+    if info.file_format == 'raw':
+        # The format_inspector will detect a luks image as 'raw', and then when
+        # we call qemu-img info -f raw above, we don't get any of the luks
+        # format-specific info (some of which is used in the create_volume
+        # flow).  So we need to check if this is really a luks container.
+        # (We didn't have to do this in the past because we called
+        # qemu-img info without -f.)
+        cmd = ['env', 'LC_ALL=C', 'qemu-img', 'info',
+               '-f', 'luks', '--output=json']
+        if force_share:
+            cmd.append('--force-share')
+        cmd.append(path)
+        if os.name == 'nt':
+            cmd = cmd[2:]
+        try:
+            out, _err = utils.execute(*cmd, run_as_root=run_as_root,
+                                      prlimit=QEMU_IMG_LIMITS)
+            info = imageutils.QemuImgInfo(out, format='json')
+        except processutils.ProcessExecutionError:
+            # we'll just use the info object we already got earlier
+            pass
+
     # From Cinder's point of view, any 'luks' formatted images
-    # should be treated as 'raw'.
+    # should be treated as 'raw'.  (This changes the file_format, but
+    # not any of the format-specific information.)
     if info.file_format == 'luks':
         info.file_format = 'raw'
 
@@ -207,8 +246,8 @@ def _get_qemu_convert_luks_cmd(src: str,
                                prefix: Optional[tuple] = None,
                                cipher_spec: Optional[dict] = None,
                                passphrase_file: Optional[str] = None,
-                               src_passphrase_file: Optional[str] = None) \
-        -> list[str]:
+                               src_passphrase_file: Optional[str] = None,
+                               disable_sparse: bool = False) -> list[str]:
     cmd = ['qemu-img', 'convert']
 
     if prefix:
@@ -216,6 +255,9 @@ def _get_qemu_convert_luks_cmd(src: str,
 
     if cache_mode:
         cmd += ('-t', cache_mode)
+
+    if disable_sparse:
+        cmd += ('-S', '0')
 
     obj1 = ['--object',
             'secret,id=sec1,format=raw,file=%s' % src_passphrase_file]
@@ -242,8 +284,8 @@ def _get_qemu_convert_cmd(src: str,
                           cipher_spec: Optional[dict] = None,
                           passphrase_file: Optional[str] = None,
                           compress: bool = False,
-                          src_passphrase_file: Optional[str] = None) \
-        -> list[str]:
+                          src_passphrase_file: Optional[str] = None,
+                          disable_sparse: bool = False) -> list[str]:
     if src_passphrase_file is not None:
         if passphrase_file is None:
             message = _("Can't create unencrypted volume %(format)s "
@@ -262,7 +304,8 @@ def _get_qemu_convert_cmd(src: str,
             prefix=None,
             cipher_spec=cipher_spec,
             passphrase_file=passphrase_file,
-            src_passphrase_file=src_passphrase_file)
+            src_passphrase_file=src_passphrase_file,
+            disable_sparse=disable_sparse)
 
     if out_format == 'vhd':
         # qemu-img still uses the legacy vpc name
@@ -275,6 +318,9 @@ def _get_qemu_convert_cmd(src: str,
 
     if cache_mode:
         cmd += ('-t', cache_mode)
+
+    if disable_sparse:
+        cmd += ('-S', '0')
 
     if CONF.image_compress_on_upload and compress:
         if out_format in COMPRESSIBLE_IMAGE_FORMATS:
@@ -340,7 +386,8 @@ def _convert_image(prefix: tuple,
                    cipher_spec: Optional[dict] = None,
                    passphrase_file: Optional[str] = None,
                    compress: bool = False,
-                   src_passphrase_file: Optional[str] = None) -> None:
+                   src_passphrase_file: Optional[str] = None,
+                   disable_sparse: bool = False) -> None:
     """Convert image to other format.
 
     NOTE: If the qemu-img convert command fails and this function raises an
@@ -389,7 +436,8 @@ def _convert_image(prefix: tuple,
                                 cipher_spec=cipher_spec,
                                 passphrase_file=passphrase_file,
                                 compress=compress,
-                                src_passphrase_file=src_passphrase_file)
+                                src_passphrase_file=src_passphrase_file,
+                                disable_sparse=disable_sparse)
 
     start_time = timeutils.utcnow()
 
@@ -450,7 +498,8 @@ def convert_image(source: str,
                   compress: bool = False,
                   src_passphrase_file: Optional[str] = None,
                   image_id: Optional[str] = None,
-                  data: Optional[imageutils.QemuImgInfo] = None) -> None:
+                  data: Optional[imageutils.QemuImgInfo] = None,
+                  disable_sparse: bool = False) -> None:
     """Convert image to other format.
 
     NOTE: If the qemu-img convert command fails and this function raises an
@@ -489,7 +538,8 @@ def convert_image(source: str,
                        cipher_spec=cipher_spec,
                        passphrase_file=passphrase_file,
                        compress=compress,
-                       src_passphrase_file=src_passphrase_file)
+                       src_passphrase_file=src_passphrase_file,
+                       disable_sparse=disable_sparse)
 
 
 def resize_image(source: str,
@@ -657,10 +707,9 @@ def get_qemu_data(image_id: str,
         if has_meta:
             if not disk_format_raw:
                 raise exception.ImageUnacceptable(
-                    reason=_("qemu-img is not installed and image is of "
-                             "type %s.  Only RAW images can be used if "
-                             "qemu-img is not installed.") %
-                    disk_format_raw,
+                    reason=_("qemu-img is not installed and image is not of "
+                             "type RAW.  Only RAW images can be used if "
+                             "qemu-img is not installed."),
                     image_id=image_id)
         else:
             raise exception.ImageUnacceptable(
@@ -669,6 +718,35 @@ def get_qemu_data(image_id: str,
                          "can be used if qemu-img is not installed."),
                 image_id=image_id)
     return data
+
+
+def check_qcow2_image(image_id: str, data: imageutils.QemuImgInfo) -> None:
+    """Check some rules about qcow2 images.
+
+    Does not check for a backing_file, because cinder has some legitimate
+    use cases for qcow2 backing files.
+
+    Makes sure the image:
+
+    - does not have a data_file
+
+    :param image_id: the image id
+    :param data: an imageutils.QemuImgInfo object
+    :raises ImageUnacceptable: when the image fails the check
+    """
+    try:
+        data_file = data.format_specific['data'].get('data-file')
+    except (KeyError, TypeError):
+        LOG.debug('Unexpected response from qemu-img info when processing '
+                  'image %s: missing format-specific info for a qcow2 image',
+                  image_id)
+        msg = _('Cannot determine format-specific information')
+        raise exception.ImageUnacceptable(image_id=image_id, reason=msg)
+    if data_file:
+        LOG.warning("Refusing to process qcow2 file with data-file '%s'",
+                    data_file)
+        msg = _('A qcow2 format image is not allowed to have a data file')
+        raise exception.ImageUnacceptable(image_id=image_id, reason=msg)
 
 
 def check_vmdk_image(image_id: str, data: imageutils.QemuImgInfo) -> None:
@@ -761,6 +839,8 @@ def check_image_format(source: str,
 
     if data.file_format == 'vmdk':
         check_vmdk_image(image_id, data)
+    if data.file_format == 'qcow2':
+        check_qcow2_image(image_id, data)
 
 
 def fetch_verify_image(context: context.RequestContext,
@@ -803,6 +883,11 @@ def fetch_verify_image(context: context.RequestContext,
             if fmt == 'vmdk':
                 check_vmdk_image(image_id, data)
 
+            # Bug #2059809: a qcow2 can have a data file that's similar
+            # to a backing file and is also unacceptable
+            if fmt == 'qcow2':
+                check_qcow2_image(image_id, data)
+
 
 def fetch_to_vhd(context: context.RequestContext,
                  image_service: glance.GlanceImageService,
@@ -812,11 +897,13 @@ def fetch_to_vhd(context: context.RequestContext,
                  volume_subformat: Optional[str] = None,
                  user_id: Optional[str] = None,
                  project_id: Optional[str] = None,
-                 run_as_root: bool = True) -> None:
+                 run_as_root: bool = True,
+                 disable_sparse: bool = False) -> None:
     fetch_to_volume_format(context, image_service, image_id, dest, 'vpc',
                            blocksize, volume_subformat=volume_subformat,
                            user_id=user_id, project_id=project_id,
-                           run_as_root=run_as_root)
+                           run_as_root=run_as_root,
+                           disable_sparse=disable_sparse)
 
 
 def fetch_to_raw(context: context.RequestContext,
@@ -827,10 +914,12 @@ def fetch_to_raw(context: context.RequestContext,
                  user_id: Optional[str] = None,
                  project_id: Optional[str] = None,
                  size: Optional[int] = None,
-                 run_as_root: bool = True) -> None:
+                 run_as_root: bool = True,
+                 disable_sparse: bool = False) -> None:
     fetch_to_volume_format(context, image_service, image_id, dest, 'raw',
                            blocksize, user_id=user_id, project_id=project_id,
-                           size=size, run_as_root=run_as_root)
+                           size=size, run_as_root=run_as_root,
+                           disable_sparse=disable_sparse)
 
 
 def check_image_conversion_disable(disk_format, volume_format, image_id,
@@ -865,7 +954,8 @@ def fetch_to_volume_format(context: context.RequestContext,
                            user_id: Optional[str] = None,
                            project_id: Optional[str] = None,
                            size: Optional[int] = None,
-                           run_as_root: bool = True) -> None:
+                           run_as_root: bool = True,
+                           disable_sparse: bool = False) -> None:
     qemu_img = True
     image_meta = image_service.show(context, image_id)
 
@@ -980,13 +1070,24 @@ def fetch_to_volume_format(context: context.RequestContext,
                       src_format=disk_format,
                       run_as_root=run_as_root,
                       image_id=image_id,
-                      data=data)
+                      data=data,
+                      disable_sparse=disable_sparse)
+
+
+@contextlib.contextmanager
+def chown_if_needed(volume_path: str) -> Generator[None, None, None]:
+    if os.name == 'nt' or os.access(volume_path, os.R_OK):
+        yield
+    else:
+        with utils.temporary_chown(volume_path):
+            yield
 
 
 def upload_volume(context: context.RequestContext,
                   image_service: glance.GlanceImageService,
                   image_meta: dict,
                   volume_path: str,
+                  volume_fd = None,
                   volume_format: str = 'raw',
                   run_as_root: bool = True,
                   compress: bool = True,
@@ -1003,14 +1104,13 @@ def upload_volume(context: context.RequestContext,
         if (image_meta['disk_format'] == volume_format):
             LOG.debug("%s was %s, no need to convert to %s",
                       image_id, volume_format, image_meta['disk_format'])
-            if os.name == 'nt' or os.access(volume_path, os.R_OK):
-                with open(volume_path, 'rb') as image_file:
-                    image_service.update(context, image_id, {},
-                                         tpool.Proxy(image_file),
-                                         store_id=store_id,
-                                         base_image_ref=base_image_ref)
+            if volume_fd is not None:
+                image_service.update(context, image_id, {},
+                                     tpool.Proxy(volume_fd),
+                                     store_id=store_id,
+                                     base_image_ref=base_image_ref)
             else:
-                with utils.temporary_chown(volume_path):
+                with chown_if_needed(volume_path):
                     with open(volume_path, 'rb') as image_file:
                         image_service.update(context, image_id, {},
                                              tpool.Proxy(image_file),

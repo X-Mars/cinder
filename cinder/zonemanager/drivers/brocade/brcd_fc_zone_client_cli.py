@@ -26,7 +26,6 @@ from eventlet import greenthread
 from oslo_concurrency import processutils
 from oslo_log import log as logging
 from oslo_utils import excutils
-import six
 
 from cinder import exception
 from cinder.i18n import _
@@ -163,7 +162,7 @@ class BrcdFCZoneClientCLI(object):
                 'zone_members_with_sep': zone_members_with_sep}
             LOG.debug("Creating zone, cmd to run %s", cmd)
             self.apply_zone_change(cmd.split())
-            if(iterator_count > 0):
+            if (iterator_count > 0):
                 zone_with_sep += ';'
             iterator_count += 1
             zone_with_sep += zone
@@ -195,7 +194,7 @@ class BrcdFCZoneClientCLI(object):
             self._cfg_trans_abort()
             msg = _("Creating and activating zone set failed: "
                     "(Zone set=%(cfg_name)s error=%(err)s)."
-                    ) % {'cfg_name': cfg_name, 'err': six.text_type(e)}
+                    ) % {'cfg_name': cfg_name, 'err': str(e)}
             LOG.error(msg)
             raise b_exception.BrocadeZoningCliException(reason=msg)
 
@@ -244,7 +243,7 @@ class BrcdFCZoneClientCLI(object):
                 'zone_members_with_sep': zone_members_with_sep}
             LOG.debug("Updating zone, cmd to run %s", cmd)
             self.apply_zone_change(cmd.split())
-            if(iterator_count > 0):
+            if (iterator_count > 0):
                 zone_with_sep += ';'
             iterator_count += 1
             zone_with_sep += zone
@@ -260,7 +259,7 @@ class BrcdFCZoneClientCLI(object):
             self._cfg_trans_abort()
             msg = _("Activating zone set failed: "
                     "(Zone set=%(cfg_name)s error=%(err)s)."
-                    ) % {'cfg_name': cfg_name, 'err': six.text_type(e)}
+                    ) % {'cfg_name': cfg_name, 'err': str(e)}
             LOG.error(msg)
             raise b_exception.BrocadeZoningCliException(reason=msg)
 
@@ -314,7 +313,7 @@ class BrcdFCZoneClientCLI(object):
                 self._cfg_save()
         except Exception as e:
             msg = _("Deleting zones failed: (command=%(cmd)s error=%(err)s)."
-                    ) % {'cmd': cmd, 'err': six.text_type(e)}
+                    ) % {'cmd': cmd, 'err': str(e)}
             LOG.error(msg)
             self._cfg_trans_abort()
             raise b_exception.BrocadeZoningCliException(reason=msg)
@@ -350,7 +349,7 @@ class BrcdFCZoneClientCLI(object):
 
     def _cfg_trans_abort(self):
         is_abortable = self._is_trans_abortable()
-        if(is_abortable):
+        if (is_abortable):
             self.apply_zone_change([zone_constant.CFG_ZONE_TRANS_ABORT])
 
     def _is_trans_abortable(self):
@@ -361,7 +360,7 @@ class BrcdFCZoneClientCLI(object):
         output = stdout.splitlines()
         is_abortable = False
         for line in output:
-            if(zone_constant.TRANS_ABORTABLE in line):
+            if (zone_constant.TRANS_ABORTABLE in line):
                 is_abortable = True
                 break
         if stderr:
@@ -410,7 +409,7 @@ class BrcdFCZoneClientCLI(object):
                 return False
         except processutils.ProcessExecutionError as e:
             msg = _("Error while getting data via ssh: (command=%(cmd)s "
-                    "error=%(err)s).") % {'cmd': cmd, 'err': six.text_type(e)}
+                    "error=%(err)s).") % {'cmd': cmd, 'err': str(e)}
             LOG.error(msg)
             raise b_exception.BrocadeZoningCliException(reason=msg)
 
@@ -424,7 +423,7 @@ class BrcdFCZoneClientCLI(object):
         except processutils.ProcessExecutionError as e:
             msg = _("Error while getting data via ssh: (command=%(cmd)s "
                     "error=%(err)s).") % {'cmd': cmd_list,
-                                          'err': six.text_type(e)}
+                                          'err': str(e)}
             LOG.error(msg)
             raise b_exception.BrocadeZoningCliException(reason=msg)
 
@@ -437,7 +436,7 @@ class BrcdFCZoneClientCLI(object):
         """
         return_list = []
         for line in switch_data:
-            if not(" NL " in line or " N " in line):
+            if not (" NL " in line or " N " in line):
                 continue
             linesplit = line.split(';')
             if len(linesplit) > 2:

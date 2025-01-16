@@ -325,11 +325,11 @@ class Volume(BASE, CinderBase):
 
     id = sa.Column(sa.String(36), primary_key=True)
     _name_id = sa.Column(sa.String(36))  # Don't access/modify this directly!
-    # TODO: (Y release) Change nullable to False
     use_quota = Column(
         sa.Boolean,
-        nullable=True,
+        nullable=False,
         default=True,
+        server_default=sa.true(),
         doc='Ignore volume in quota usage',
     )
 
@@ -643,7 +643,10 @@ class VolumeTypeExtraSpecs(BASE, CinderBase):
     value = sa.Column(sa.String(255))
     volume_type_id = sa.Column(
         sa.String(36),
-        sa.ForeignKey('volume_types.id'),
+        sa.ForeignKey(
+            'volume_types.id',
+            name='volume_type_extra_specs_ibfk_1',
+        ),
         nullable=False,
         index=True,
     )
@@ -802,10 +805,8 @@ class Quota(BASE, CinderBase):
     # TODO(stephenfin): Add index=True
     project_id = sa.Column(sa.String(255))
 
-    resource = sa.Column(sa.String(255), nullable=False)
+    resource = sa.Column(sa.String(300), nullable=False)
     hard_limit = sa.Column(sa.Integer, nullable=True)
-    # TODO: (X release): Remove allocated, belonged to nested quotas
-    allocated = sa.Column(sa.Integer, default=0)
 
 
 class QuotaClass(BASE, CinderBase):
@@ -822,7 +823,7 @@ class QuotaClass(BASE, CinderBase):
 
     class_name = sa.Column(sa.String(255), index=True)
 
-    resource = sa.Column(sa.String(255))
+    resource = sa.Column(sa.String(300))
     hard_limit = sa.Column(sa.Integer, nullable=True)
 
 
@@ -880,13 +881,9 @@ class Reservation(BASE, CinderBase):
     usage_id = sa.Column(
         sa.Integer, sa.ForeignKey('quota_usages.id'), nullable=True, index=True
     )
-    # TODO: (X release): Remove allocated_id, belonged to nested quotas
-    allocated_id = sa.Column(
-        sa.Integer, sa.ForeignKey('quotas.id'), nullable=True, index=True
-    )
 
     project_id = sa.Column(sa.String(255), index=True)
-    resource = sa.Column(sa.String(255))
+    resource = sa.Column(sa.String(300))
 
     delta = sa.Column(sa.Integer, nullable=False)
     # TODO(stephenfin): Add nullable=False
@@ -897,12 +894,6 @@ class Reservation(BASE, CinderBase):
         foreign_keys=usage_id,
         primaryjoin='and_(Reservation.usage_id == QuotaUsage.id,'
         'QuotaUsage.deleted == False)',
-    )
-    # TODO: (X release): Remove allocated_id, belonged to nested quotas
-    quota = relationship(
-        "Quota",
-        foreign_keys=allocated_id,
-        primaryjoin='and_(Reservation.allocated_id == Quota.id)',
     )
 
 
@@ -917,11 +908,11 @@ class Snapshot(BASE, CinderBase):
     )
 
     id = sa.Column(sa.String(36), primary_key=True)
-    # TODO: (Y release) Change nullable to False
     use_quota = Column(
         sa.Boolean,
-        nullable=True,
+        nullable=False,
         default=True,
+        server_default=sa.true(),
         doc='Ignore volume in quota usage',
     )
 
@@ -1228,9 +1219,9 @@ class Worker(BASE, CinderBase):
 
     # Type of the resource we are working on (Volume, Snapshot, Backup) it must
     # match the Versioned Object class name.
-    resource_type = sa.Column(sa.String(40), primary_key=True, nullable=False)
+    resource_type = sa.Column(sa.String(40), nullable=False)
     # UUID of the resource we are working on
-    resource_id = sa.Column(sa.String(36), primary_key=True, nullable=False)
+    resource_id = sa.Column(sa.String(36), nullable=False)
 
     # Status that should be cleaned on service failure
     status = sa.Column(sa.String(255), nullable=False)

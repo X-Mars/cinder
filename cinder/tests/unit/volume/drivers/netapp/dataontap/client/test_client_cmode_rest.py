@@ -21,7 +21,6 @@ import uuid
 
 import ddt
 from oslo_utils import units
-import six
 
 from cinder import exception
 from cinder.tests.unit import test
@@ -96,8 +95,8 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
         self.connection = self.client.connection
 
         self.vserver = CONNECTION_INFO['vserver']
-        self.fake_volume = six.text_type(uuid.uuid4())
-        self.fake_lun = six.text_type(uuid.uuid4())
+        self.fake_volume = str(uuid.uuid4())
+        self.fake_lun = str(uuid.uuid4())
         # this line interferes in test__get_cluster_nodes_info
         # self.mock_send_request = self.mock_object(
         #    self.client, 'send_request')
@@ -854,6 +853,7 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             'uuid': fake.UUID1,
             'fields': 'svm.name,location.volume.name,space.size,'
                       'location.qtree.name,name,os_type,'
+                      'space.scsi_thin_provisioning_support_enabled,'
                       'space.guarantee.requested,uuid'
         }
 
@@ -884,6 +884,7 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             'name': path,
             'fields': 'svm.name,location.volume.name,space.size,'
                       'location.qtree.name,name,os_type,'
+                      'space.scsi_thin_provisioning_support_enabled,'
                       'space.guarantee.requested,uuid'
         }
 
@@ -1678,6 +1679,8 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             'space.size': str(initial_size),
             'os_type': metadata['OsType'],
             'space.guarantee.requested': metadata['SpaceReserved'],
+            'space.scsi_thin_provisioning_support_enabled':
+                metadata['SpaceAllocated'],
             'qos_policy.name': fake.QOS_POLICY_GROUP_NAME
         }
 
@@ -2515,7 +2518,7 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
                          return_value=fake_client.VOLUME_DEDUPE_INFO_SSC)
 
         expected_prov_opts = {
-            'aggregate': 'fake_aggr1',
+            'aggregate': ['fake_aggr1'],
             'compression_enabled': False,
             'dedupe_enabled': True,
             'language': 'c.utf_8',
@@ -2737,8 +2740,8 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             'destination.path': (fake_client.SM_DEST_VSERVER +
                                  ':' + fake_client.SM_DEST_VOLUME),
             'fields': 'state,source.svm.name,source.path,destination.svm.name,'
-                      'destination.path,transfer.end_time,lag_time,healthy,'
-                      'uuid'
+                      'destination.path,transfer.state,transfer.end_time,'
+                      'lag_time,healthy,uuid'
         }
 
         mock_send_request.assert_called_once_with('/snapmirror/relationships',
@@ -2762,8 +2765,8 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             'destination.path': (fake_client.SM_DEST_VSERVER +
                                  ':' + fake_client.SM_DEST_VOLUME),
             'fields': 'state,source.svm.name,source.path,destination.svm.name,'
-                      'destination.path,transfer.end_time,lag_time,healthy,'
-                      'uuid'
+                      'destination.path,transfer.state,transfer.end_time,'
+                      'lag_time,healthy,uuid'
         }
 
         mock_send_request.assert_called_once_with('/snapmirror/relationships',
@@ -2789,8 +2792,8 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             'destination.path': (fake_client.SM_DEST_VSERVER +
                                  ':' + fake_client.SM_DEST_VOLUME),
             'fields': 'state,source.svm.name,source.path,destination.svm.name,'
-                      'destination.path,transfer.end_time,lag_time,healthy,'
-                      'uuid'
+                      'destination.path,transfer.state,transfer.end_time,'
+                      'lag_time,healthy,uuid'
         }
 
         mock_send_request.assert_called_once_with('/snapmirror/relationships',
@@ -3233,37 +3236,23 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
         self.assertEqual(expected_job, result)
 
     def test_break_snapmirror(self):
-        snapmirror_response = copy.deepcopy(
-            fake_client.SNAPMIRROR_GET_ITER_RESPONSE_REST)
+        fake_snapmirror = fake_client.REST_GET_SNAPMIRRORS_RESPONSE
+        fake_uuid = fake_snapmirror[0]['uuid']
+        fake_body = {'state': 'broken_off'}
 
-        snapmirror_response['state'] = 'broken_off'
-        response_list = [snapmirror_response]
+        self.mock_object(self.client, 'send_request')
 
-        self.mock_object(self.client, 'send_request',
-                         side_effect=copy.deepcopy(response_list))
-
-        expected_job = {
-            'operation-id': None,
-            'status': None,
-            'jobid': fake_client.FAKE_UUID,
-            'error-code': None,
-            'error-message': None,
-            'relationship-uuid': fake_client.FAKE_UUID,
-        }
-
-        mock_set_snapmirror_state = self.mock_object(
-            self.client,
-            '_set_snapmirror_state',
-            return_value=expected_job)
+        mock_get_snap = self.mock_object(
+            self.client, '_get_snapmirrors',
+            mock.Mock(return_value=fake_snapmirror))
 
         self.client.break_snapmirror(
             fake_client.SM_SOURCE_VSERVER, fake_client.SM_SOURCE_VOLUME,
             fake_client.SM_DEST_VSERVER, fake_client.SM_DEST_VOLUME)
 
-        mock_set_snapmirror_state.assert_called_once_with(
-            'broken-off',
-            fake_client.SM_SOURCE_VSERVER, fake_client.SM_SOURCE_VOLUME,
-            fake_client.SM_DEST_VSERVER, fake_client.SM_DEST_VOLUME)
+        mock_get_snap.assert_called_once()
+        self.client.send_request.assert_called_once_with(
+            f'/snapmirror/relationships/{fake_uuid}', 'patch', body=fake_body)
 
     def test_break_snapmirror_not_found(self):
         self.mock_object(
@@ -3278,13 +3267,29 @@ class NetAppRestCmodeClientTestCase(test.TestCase):
             fake_client.SM_DEST_VSERVER,
             fake_client.SM_DEST_VOLUME)
 
-    def test_break_snapmirror_timeout(self):
-        # when a timeout happens, an exception is thrown by send_request
-        api_error = netapp_api.NaRetryableError()
+    def test__break_snapmirror_error(self):
+        fake_snapmirror = fake_client.REST_GET_SNAPMIRRORS_RESPONSE
+        self.mock_object(self.client, '_get_snapmirrors',
+                         return_value=fake_snapmirror)
         self.mock_object(self.client, 'send_request',
-                         side_effect=api_error)
+                         side_effect=self._mock_api_error())
+        self.assertRaises(netapp_api.NaApiError,
+                          self.client.break_snapmirror,
+                          fake_client.SM_SOURCE_VSERVER,
+                          fake_client.SM_SOURCE_VOLUME,
+                          fake_client.SM_DEST_VSERVER,
+                          fake_client.SM_DEST_VOLUME)
 
-        self.assertRaises(netapp_api.NaRetryableError,
+    def test__break_snapmirror_exception(self):
+        fake_snapmirror = copy.deepcopy(
+            fake_client.REST_GET_SNAPMIRRORS_RESPONSE)
+        fake_snapmirror[0]['transferring-state'] = 'error'
+
+        self.mock_object(
+            self.client, '_get_snapmirrors',
+            mock.Mock(return_value=fake_snapmirror))
+
+        self.assertRaises(netapp_utils.NetAppDriverException,
                           self.client.break_snapmirror,
                           fake_client.SM_SOURCE_VSERVER,
                           fake_client.SM_SOURCE_VOLUME,

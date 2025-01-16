@@ -88,23 +88,17 @@ volume_opts = [
     cfg.StrOpt('target_helper',
                default='tgtadm',
                choices=['tgtadm', 'lioadm', 'scstadmin', 'iscsictl',
-                        'ietadm', 'nvmet', 'spdk-nvmeof', 'fake'],
+                        'nvmet', 'spdk-nvmeof', 'fake'],
                help='Target user-land tool to use. tgtadm is default, '
                     'use lioadm for LIO iSCSI support, scstadmin for SCST '
-                    'target support, ietadm for iSCSI Enterprise Target, '
+                    'target support, '
                     'iscsictl for Chelsio iSCSI Target, nvmet for NVMEoF '
                     'support, spdk-nvmeof for SPDK NVMe-oF, '
-                    'or fake for testing. Note: The IET driver is deprecated '
-                    'and will be removed in the V release.'),
+                    'or fake for testing.'),
     cfg.StrOpt('volumes_dir',
                default='$state_path/volumes',
                help='Volume configuration file storage '
                'directory'),
-    cfg.StrOpt('iet_conf',
-               default='/etc/iet/ietd.conf',
-               deprecated_for_removal=True,
-               deprecated_reason='IET target driver is no longer supported.',
-               help='DEPRECATED: IET configuration file'),
     cfg.StrOpt('chiscsi_conf',
                default='/etc/chelsio-iscsi/chiscsi.conf',
                help='Chiscsi (CXT) global defaults configuration file'),
@@ -114,7 +108,11 @@ volume_opts = [
                help=('Sets the behavior of the iSCSI target '
                      'to either perform blockio or fileio '
                      'optionally, auto can be set and Cinder '
-                     'will autodetect type of backing device')),
+                     'will autodetect type of backing device'),
+               deprecated_for_removal=True,
+               deprecated_since='2024.2',
+               deprecated_reason='No longer used (was for ietadm).'
+               ),
     cfg.StrOpt('volume_dd_blocksize',
                default='1M',
                help='The default block size used when copying/clearing '
@@ -464,7 +462,6 @@ class BaseVD(object, metaclass=abc.ABCMeta):
         # (intended for LVM, but others could use as well)
         self.target_mapping = {
             'fake': 'cinder.volume.targets.fake.FakeTarget',
-            'ietadm': 'cinder.volume.targets.iet.IetAdm',
             'lioadm': 'cinder.volume.targets.lio.LioAdm',
             'tgtadm': 'cinder.volume.targets.tgt.TgtAdm',
             'scstadmin': 'cinder.volume.targets.scst.SCSTAdm',
@@ -867,25 +864,30 @@ class BaseVD(object, metaclass=abc.ABCMeta):
             data["pools"].append(single_pool)
         self._stats = data
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id,
+                             disable_sparse=False):
         """Fetch image from image_service and write to unencrypted volume.
 
         This does not attach an encryptor layer when connecting to the volume.
         """
         self._copy_image_data_to_volume(
-            context, volume, image_service, image_id, encrypted=False)
+            context, volume, image_service, image_id, encrypted=False,
+            disable_sparse=disable_sparse)
 
     def copy_image_to_encrypted_volume(
-            self, context, volume, image_service, image_id):
+            self, context, volume, image_service, image_id,
+            disable_sparse=False):
         """Fetch image from image_service and write to encrypted volume.
 
         This attaches the encryptor layer when connecting to the volume.
         """
         self._copy_image_data_to_volume(
-            context, volume, image_service, image_id, encrypted=True)
+            context, volume, image_service, image_id, encrypted=True,
+            disable_sparse=disable_sparse)
 
     def _copy_image_data_to_volume(self, context, volume, image_service,
-                                   image_id, encrypted=False):
+                                   image_id, encrypted=False,
+                                   disable_sparse=False):
         """Fetch the image from image_service and write it to the volume."""
         LOG.debug('copy_image_to_volume %s.', volume['name'])
 
@@ -909,7 +911,7 @@ class BaseVD(object, metaclass=abc.ABCMeta):
                     image_id,
                     attach_info['device']['path'],
                     self.configuration.volume_dd_blocksize,
-                    size=volume['size'])
+                    size=volume['size'], disable_sparse=disable_sparse)
             except exception.ImageTooBig:
                 with excutils.save_and_reraise_exception():
                     LOG.exception("Copying image %(image_id)s "
@@ -950,18 +952,20 @@ class BaseVD(object, metaclass=abc.ABCMeta):
                                 force=True, ignore_errors=True)
 
     def before_volume_copy(self, context, src_vol, dest_vol, remote=None):
-        """Driver-specific actions before copyvolume data.
+        """Driver-specific actions executed before copying a volume.
 
-        This method will be called before _copy_volume_data during volume
-        migration
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.before_volume_copy`
+        for additional information.
         """
         pass
 
     def after_volume_copy(self, context, src_vol, dest_vol, remote=None):
-        """Driver-specific actions after copyvolume data.
+        """Driver-specific actions executed after copying a volume.
 
-        This method will be called after _copy_volume_data during volume
-        migration
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.after_volume_copy`
+        for additional information.
         """
         pass
 
@@ -1082,6 +1086,10 @@ class BaseVD(object, metaclass=abc.ABCMeta):
             if conn['data'].get('encrypted') is None:
                 encrypted = bool(volume.encryption_key_id)
                 conn['data']['encrypted'] = encrypted
+
+        # Append the enforce_multipath value if the connector has it
+        conn['data']['enforce_multipath'] = properties.get(
+            'enforce_multipath', False)
 
         try:
             attach_info = self._connect_device(conn)
@@ -1353,8 +1361,6 @@ class BaseVD(object, metaclass=abc.ABCMeta):
             'availability_zone': volume.availability_zone,
             'volume_type_id': volume.volume_type_id,
             'use_quota': False,  # Don't count for quota
-            # TODO: (Y release) Remove admin_metadata and only use use_quota
-            'admin_metadata': {'temporary': 'True'},
         }
         kwargs.update(volume_options or {})
         temp_vol_ref = objects.Volume(context=context.elevated(), **kwargs)
@@ -1410,17 +1416,9 @@ class BaseVD(object, metaclass=abc.ABCMeta):
                                original_volume_status):
         """Return model update for migrated volume.
 
-        Each driver implementing this method needs to be responsible for the
-        values of _name_id and provider_location. If None is returned or either
-        key is not set, it means the volume table does not need to change the
-        value(s) for the key(s).
-        The return format is {"_name_id": value, "provider_location": value}.
-
-        :param volume: The original volume that was migrated to this backend
-        :param new_volume: The migration volume object that was created on
-                           this backend as part of the migration process
-        :param original_volume_status: The status of the original volume
-        :returns: model_update to update DB with any needed changes
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.update_migrated_volume`
+        for additional information.
         """
         msg = _("The method update_migrated_volume is not implemented.")
         raise NotImplementedError(msg)
@@ -1430,6 +1428,12 @@ class BaseVD(object, metaclass=abc.ABCMeta):
         pass
 
     def retype(self, context, volume, new_type, diff, host):
+        """Change the type of a volume.
+
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.retype`
+        for additional information.
+        """
         return False, None
 
     def create_cloned_volume(self, volume, src_vref):
@@ -1545,10 +1549,14 @@ class BaseVD(object, metaclass=abc.ABCMeta):
         return None, None
 
     def migrate_volume(self, context, volume, host):
-        """Migrate volume stub.
+        """Migrate the volume to the specified host.
 
-        This is for drivers that don't implement an enhanced version
-        of this operation.
+        This is a stub for drivers that don't implement an enhanced
+        version of this operation.
+
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.migrate_volume`
+        for additional information.
         """
         return (False, None)
 
@@ -2025,14 +2033,9 @@ class MigrateVD(object, metaclass=abc.ABCMeta):
     def migrate_volume(self, context, volume, host):
         """Migrate the volume to the specified host.
 
-        Returns a boolean indicating whether the migration occurred, as well as
-        model_update.
-
-        :param context: Context
-        :param volume: A dictionary describing the volume to migrate
-        :param host: A dictionary describing the host to migrate to, where
-                     host['host'] is its name, and host['capabilities'] is a
-                     dictionary of its reported capabilities.
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.migrate_volume`
+        for additional information.
         """
         return (False, None)
 
@@ -2315,6 +2318,12 @@ class VolumeDriver(ManageableVD, CloneableImageVD, ManageableSnapshotsVD,
         """Unmanage the specified snapshot from Cinder management."""
 
     def retype(self, context, volume, new_type, diff, host):
+        """Change the type of a volume.
+
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.retype`
+        for additional information.
+        """
         return False, None
 
     # #######  Interface methods for DataPath (Connector) ########
@@ -2581,6 +2590,12 @@ class VolumeDriver(ManageableVD, CloneableImageVD, ManageableSnapshotsVD,
         return None
 
     def migrate_volume(self, context, volume, host):
+        """Migrate the volume to the specified host.
+
+        Refer to
+        :obj:`cinder.interface.volume_driver.VolumeDriverCore.migrate_volume`
+        for additional information.
+        """
         return (False, None)
 
     def accept_transfer(self, context, volume, new_user, new_project):
@@ -2775,7 +2790,8 @@ class ISCSIDriver(VolumeDriver):
 
         If the backend driver supports multiple connections for multipath and
         for single path with failover, "target_portals", "target_iqns",
-        "target_luns" are also populated::
+        "target_luns" are also populated. In this example also LUN values
+        greater than 255 use flat addressing mode::
 
             {
                 'driver_volume_type': 'iscsi',
@@ -2790,6 +2806,7 @@ class ISCSIDriver(VolumeDriver):
                     'target_luns': [1, 1],
                     'volume_id': 1,
                     'discard': False,
+                    'addressing_mode': os_brick.constants.SCSI_ADDRESSING_SAM2,
                 }
             }
         """
@@ -2935,6 +2952,7 @@ class FibreChannelDriver(VolumeDriver):
                     'target_lun': 1,
                     'target_wwn': ['1234567890123', '0987654321321'],
                     'discard': False,
+                    'addressing_mode': os_brick.constants.SCSI_ADDRESSING_SAM2,
                 }
             }
 

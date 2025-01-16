@@ -12,9 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from __future__ import annotations
-
-from typing import Optional, Union  # noqa: H301
+from typing import Optional, Union
 
 from cinder.common import constants
 from cinder import context
@@ -140,9 +138,10 @@ class VolumeAPI(rpc.RPCAPI):
         3.16 - Add no_snapshots to accept_transfer method
         3.17 - Make get_backup_device a cast (async)
         3.18 - Add reimage method
+        3.19 - Add extend_volume_completion method
     """
 
-    RPC_API_VERSION = '3.18'
+    RPC_API_VERSION = '3.19'
     RPC_DEFAULT_VERSION = '3.0'
     TOPIC = constants.VOLUME_TOPIC
     BINARY = constants.VOLUME_BINARY
@@ -278,6 +277,13 @@ class VolumeAPI(rpc.RPCAPI):
         cctxt = self._get_cctxt(volume.service_topic_queue)
         cctxt.cast(ctxt, 'extend_volume', volume=volume, new_size=new_size,
                    reservations=reservations)
+
+    @rpc.assert_min_rpc_version('3.19')
+    def extend_volume_completion(self, ctxt, volume, new_size, reservations,
+                                 error):
+        cctxt = self._get_cctxt(volume.service_topic_queue, version='3.19')
+        cctxt.cast(ctxt, 'extend_volume_completion', volume=volume,
+                   new_size=new_size, reservations=reservations, error=error)
 
     def migrate_volume(self, ctxt, volume, dest_backend, force_host_copy):
         backend_p = {'host': dest_backend.host,

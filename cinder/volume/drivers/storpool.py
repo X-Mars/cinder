@@ -19,11 +19,12 @@ import platform
 
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_utils import excutils
 from oslo_utils import importutils
 from oslo_utils import units
-import six
 
 from cinder.common import constants
+from cinder import context
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
@@ -91,9 +92,10 @@ class StorPoolDriver(driver.VolumeDriver):
         1.2.2   - Reintroduce the driver into OpenStack Queens,
                   add ignore_errors to the internal _detach_volume() method
         1.2.3   - Advertise some more driver capabilities.
+        2.0.0   - Implement revert_to_snapshot().
     """
 
-    VERSION = '1.2.3'
+    VERSION = '2.0.0'
     CI_WIKI_NAME = 'StorPool_distributed_storage_CI'
 
     def __init__(self, *args, **kwargs):
@@ -109,7 +111,7 @@ class StorPoolDriver(driver.VolumeDriver):
         return storpool_opts
 
     def _backendException(self, e):
-        return exception.VolumeBackendAPIException(data=six.text_type(e))
+        return exception.VolumeBackendAPIException(data=str(e))
 
     def _template_from_volume(self, volume):
         default = self.configuration.storpool_template
@@ -131,19 +133,16 @@ class StorPoolDriver(driver.VolumeDriver):
         size = int(volume['size']) * units.Gi
         name = self._attach.volumeName(volume['id'])
         template = self._template_from_volume(volume)
+
+        create_request = {'name': name, 'size': size}
+        if template is not None:
+            create_request['template'] = template
+        else:
+            create_request['replication'] = \
+                self.configuration.storpool_replication
+
         try:
-            if template is None:
-                self._attach.api().volumeCreate({
-                    'name': name,
-                    'size': size,
-                    'replication': self.configuration.storpool_replication
-                })
-            else:
-                self._attach.api().volumeCreate({
-                    'name': name,
-                    'size': size,
-                    'template': template
-                })
+            self._attach.api().volumeCreate(create_request)
         except spapi.ApiError as e:
             raise self._backendException(e)
 
@@ -168,6 +167,7 @@ class StorPoolDriver(driver.VolumeDriver):
                 'data': {
                     'client_id': self._storpool_client_id(connector),
                     'volume': volume['id'],
+                    'access_mode': 'rw',
                 }}
 
     def terminate_connection(self, volume, connector, **kwargs):
@@ -196,30 +196,80 @@ class StorPoolDriver(driver.VolumeDriver):
 
     def create_cloned_volume(self, volume, src_vref):
         refname = self._attach.volumeName(src_vref['id'])
+        size = int(volume['size']) * units.Gi
+        volname = self._attach.volumeName(volume['id'])
+
+        src_volume = self.db.volume_get(
+            context.get_admin_context(),
+            src_vref['id'],
+        )
+        src_template = self._template_from_volume(src_volume)
+
+        template = self._template_from_volume(volume)
+        LOG.debug('clone volume id %(vol_id)r template %(template)r', {
+            'vol_id': volume['id'],
+            'template': template,
+        })
+        if template == src_template:
+            LOG.info('Using baseOn to clone a volume into the same template')
+            try:
+                self._attach.api().volumeCreate({
+                    'name': volname,
+                    'size': size,
+                    'baseOn': refname,
+                })
+            except spapi.ApiError as e:
+                raise self._backendException(e)
+
+            return None
+
         snapname = self._attach.snapshotName('clone', volume['id'])
+        LOG.info(
+            'A transient snapshot for a %(src)s -> %(dst)s template change',
+            {'src': src_template, 'dst': template})
         try:
             self._attach.api().snapshotCreate(refname, {'name': snapname})
         except spapi.ApiError as e:
-            raise self._backendException(e)
+            if e.name != 'objectExists':
+                raise self._backendException(e)
 
-        size = int(volume['size']) * units.Gi
-        volname = self._attach.volumeName(volume['id'])
         try:
-            self._attach.api().volumeCreate({
-                'name': volname,
-                'size': size,
-                'parent': snapname
-            })
-        except spapi.ApiError as e:
-            raise self._backendException(e)
-        finally:
             try:
-                self._attach.api().snapshotDelete(snapname)
+                self._attach.api().snapshotUpdate(
+                    snapname,
+                    {'template': template},
+                )
             except spapi.ApiError as e:
-                # ARGH!
-                LOG.error("Could not delete the temp snapshot %(name)s: "
-                          "%(msg)s",
-                          {'name': snapname, 'msg': e})
+                raise self._backendException(e)
+
+            try:
+                self._attach.api().volumeCreate({
+                    'name': volname,
+                    'size': size,
+                    'parent': snapname
+                })
+            except spapi.ApiError as e:
+                raise self._backendException(e)
+
+            try:
+                self._attach.api().snapshotUpdate(
+                    snapname,
+                    {'tags': {'transient': '1.0'}},
+                )
+            except spapi.ApiError as e:
+                raise self._backendException(e)
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                try:
+                    LOG.warning(
+                        'Something went wrong, removing the transient snapshot'
+                    )
+                    self._attach.api().snapshotDelete(snapname)
+                except spapi.ApiError as e:
+                    LOG.error(
+                        'Could not delete the %(name)s snapshot: %(err)s',
+                        {'name': snapname, 'err': str(e)}
+                    )
 
     def create_export(self, context, volume, connector):
         pass
@@ -302,127 +352,18 @@ class StorPoolDriver(driver.VolumeDriver):
                        ) for t in templates]
 
         self._stats = {
+            # Basic driver properties
             'volume_backend_name': self.configuration.safe_get(
                 'volume_backend_name') or 'storpool',
             'vendor_name': 'StorPool',
             'driver_version': self.VERSION,
             'storage_protocol': constants.STORPOOL,
-
+            # Driver capabilities
+            'clone_across_pools': True,
             'sparse_copy_volume': True,
-
+            # The actual pools data
             'pools': pools
         }
-
-    def _attach_volume(self, context, volume, properties, remote=False):
-        if remote:
-            return super(StorPoolDriver, self)._attach_volume(
-                context, volume, properties, remote=remote)
-        req_id = context.request_id
-        req = self._attach.get().get(req_id, None)
-        if req is None:
-            req = {
-                'volume': self._attach.volumeName(volume['id']),
-                'type': 'cinder-attach',
-                'id': context.request_id,
-                'rights': 2,
-                'volsnap': False,
-                'remove_on_detach': True
-            }
-            self._attach.add(req_id, req)
-        name = req['volume']
-        self._attach.sync(req_id, None)
-        return {'device': {'path': '/dev/storpool/' + name,
-                'storpool_attach_req': req_id}}, volume
-
-    def _detach_volume(self, context, attach_info, volume, properties,
-                       force=False, remote=False, ignore_errors=False):
-        if remote:
-            return super(StorPoolDriver, self)._detach_volume(
-                context, attach_info, volume, properties,
-                force=force, remote=remote, ignore_errors=ignore_errors)
-        try:
-            req_id = attach_info.get('device', {}).get(
-                'storpool_attach_req', context.request_id)
-            req = self._attach.get()[req_id]
-            name = req['volume']
-            self._attach.sync(req_id, name)
-            if req.get('remove_on_detach', False):
-                self._attach.remove(req_id)
-        except BaseException:
-            if not ignore_errors:
-                raise
-
-    def backup_volume(self, context, backup, backup_service):
-        volume = self.db.volume_get(context, backup['volume_id'])
-        req_id = context.request_id
-        volname = self._attach.volumeName(volume['id'])
-        name = self._attach.volsnapName(volume['id'], req_id)
-        try:
-            self._attach.api().snapshotCreate(volname, {'name': name})
-        except spapi.ApiError as e:
-            raise self._backendException(e)
-        self._attach.add(req_id, {
-            'volume': name,
-            'type': 'backup',
-            'id': req_id,
-            'rights': 1,
-            'volsnap': True
-        })
-        try:
-            return super(StorPoolDriver, self).backup_volume(
-                context, backup, backup_service)
-        finally:
-            self._attach.remove(req_id)
-            try:
-                self._attach.api().snapshotDelete(name)
-            except spapi.ApiError as e:
-                LOG.error(
-                    'Could not remove the temp snapshot %(name)s for '
-                    '%(vol)s: %(err)s',
-                    {'name': name, 'vol': volname, 'err': e})
-
-    def copy_volume_to_image(self, context, volume, image_service, image_meta):
-        req_id = context.request_id
-        volname = self._attach.volumeName(volume['id'])
-        name = self._attach.volsnapName(volume['id'], req_id)
-        try:
-            self._attach.api().snapshotCreate(volname, {'name': name})
-        except spapi.ApiError as e:
-            raise self._backendException(e)
-        self._attach.add(req_id, {
-            'volume': name,
-            'type': 'copy-from',
-            'id': req_id,
-            'rights': 1,
-            'volsnap': True
-        })
-        try:
-            return super(StorPoolDriver, self).copy_volume_to_image(
-                context, volume, image_service, image_meta)
-        finally:
-            self._attach.remove(req_id)
-            try:
-                self._attach.api().snapshotDelete(name)
-            except spapi.ApiError as e:
-                LOG.error(
-                    'Could not remove the temp snapshot %(name)s for '
-                    '%(vol)s: %(err)s',
-                    {'name': name, 'vol': volname, 'err': e})
-
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
-        req_id = context.request_id
-        name = self._attach.volumeName(volume['id'])
-        self._attach.add(req_id, {
-            'volume': name,
-            'type': 'copy-to',
-            'id': req_id,
-            'rights': 2
-        })
-        try:
-            return super(StorPoolDriver, self).copy_image_to_volume(
-                context, volume, image_service, image_id)
-        finally:
-            self._attach.remove(req_id)
 
     def extend_volume(self, volume, new_size):
         size = int(new_size) * units.Gi
@@ -448,24 +389,24 @@ class StorPoolDriver(driver.VolumeDriver):
         templ = self.configuration.storpool_template
         repl = self.configuration.storpool_replication
         if diff['extra_specs']:
-            for (k, v) in diff['extra_specs'].items():
-                if k == 'volume_backend_name':
-                    if v[0] != v[1]:
-                        # Retype of a volume backend not supported yet,
-                        # the volume needs to be migrated.
-                        return False
-                elif k == 'storpool_template':
-                    if v[0] != v[1]:
-                        if v[1] is not None:
-                            update['template'] = v[1]
-                        elif templ is not None:
-                            update['template'] = templ
-                        else:
-                            update['replication'] = repl
-                elif v[0] != v[1]:
-                    LOG.error('Retype of extra_specs "%s" not '
-                              'supported yet.', k)
+            # Check for the StorPool extra specs. We intentionally ignore any
+            # other extra_specs because the cinder scheduler should not even
+            # call us if there's a serious mismatch between the volume types.
+            if diff['extra_specs'].get('volume_backend_name'):
+                v = diff['extra_specs'].get('volume_backend_name')
+                if v[0] != v[1]:
+                    # Retype of a volume backend not supported yet,
+                    # the volume needs to be migrated.
                     return False
+            if diff['extra_specs'].get('storpool_template'):
+                v = diff['extra_specs'].get('storpool_template')
+                if v[0] != v[1]:
+                    if v[1] is not None:
+                        update['template'] = v[1]
+                    elif templ is not None:
+                        update['template'] = templ
+                    else:
+                        update['replication'] = repl
 
         if update:
             name = self._attach.volumeName(volume['id'])
@@ -490,21 +431,61 @@ class StorPoolDriver(driver.VolumeDriver):
                       'created as part of the migration from '
                       '"%(oid)s".', {'tid': temp_id, 'oid': orig_id})
             return {'_name_id': new_volume['_name_id'] or new_volume['id']}
-        elif orig_name in vols:
-            LOG.error('StorPool update_migrated_volume(): both '
+
+        if orig_name in vols:
+            LOG.debug('StorPool update_migrated_volume(): both '
                       'the original volume "%(oid)s" and the migrated '
                       'StorPool volume "%(tid)s" seem to exist on '
                       'the StorPool cluster.',
                       {'oid': orig_id, 'tid': temp_id})
-            return {'_name_id': new_volume['_name_id'] or new_volume['id']}
-        else:
+            int_name = temp_name + '--temp--mig'
+            LOG.debug('Trying to swap volume names, intermediate "%(int)s"',
+                      {'int': int_name})
             try:
+                LOG.debug('- rename "%(orig)s" to "%(int)s"',
+                          {'orig': orig_name, 'int': int_name})
+                self._attach.api().volumeUpdate(orig_name,
+                                                {'rename': int_name})
+
+                LOG.debug('- rename "%(temp)s" to "%(orig)s"',
+                          {'temp': temp_name, 'orig': orig_name})
                 self._attach.api().volumeUpdate(temp_name,
                                                 {'rename': orig_name})
+
+                LOG.debug('- rename "%(int)s" to "%(temp)s"',
+                          {'int': int_name, 'temp': temp_name})
+                self._attach.api().volumeUpdate(int_name,
+                                                {'rename': temp_name})
                 return {'_name_id': None}
             except spapi.ApiError as e:
                 LOG.error('StorPool update_migrated_volume(): '
-                          'could not rename %(tname)s to %(oname)s: '
+                          'could not rename a volume: '
                           '%(err)s',
-                          {'tname': temp_name, 'oname': orig_name, 'err': e})
+                          {'err': e})
                 return {'_name_id': new_volume['_name_id'] or new_volume['id']}
+
+        try:
+            self._attach.api().volumeUpdate(temp_name,
+                                            {'rename': orig_name})
+            return {'_name_id': None}
+        except spapi.ApiError as e:
+            LOG.error('StorPool update_migrated_volume(): '
+                      'could not rename %(tname)s to %(oname)s: '
+                      '%(err)s',
+                      {'tname': temp_name, 'oname': orig_name, 'err': e})
+            return {'_name_id': new_volume['_name_id'] or new_volume['id']}
+
+    def revert_to_snapshot(self, context, volume, snapshot):
+        volname = self._attach.volumeName(volume['id'])
+        snapname = self._attach.snapshotName('snap', snapshot['id'])
+        try:
+            rev = sptypes.VolumeRevertDesc(toSnapshot=snapname)
+            self._attach.api().volumeRevert(volname, rev)
+        except spapi.ApiError as e:
+            LOG.error('StorPool revert_to_snapshot(): could not revert '
+                      'the %(vol_id)s volume to the %(snap_id)s snapshot: '
+                      '%(err)s',
+                      {'vol_id': volume['id'],
+                       'snap_id': snapshot['id'],
+                       'err': e})
+            raise self._backendException(e)

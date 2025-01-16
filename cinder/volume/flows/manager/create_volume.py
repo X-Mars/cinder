@@ -10,12 +10,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from __future__ import annotations
-
 import binascii
 import traceback
 import typing
-from typing import Any, Optional  # noqa: H301
+from typing import Any, Optional
 
 from castellan import key_manager
 import os_brick.initiator.connectors
@@ -598,17 +596,18 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
                     # and is detected as another format.
                     raise exception.Invalid()
 
-                if encryption['provider'] == 'luks':
+                encryption_provider = encryption['provider']
+                if encryption_provider == 'luks':
                     # Force ambiguous "luks" provider to luks1 for
                     # compatibility with new versions of cryptsetup.
-                    encryption['provider'] = 'luks1'
+                    encryption_provider = 'luks1'
 
                 (out, err) = utils.execute(
                     'cryptsetup',
                     '--batch-mode',
                     'luksFormat',
                     '--force-password',
-                    '--type', encryption['provider'],
+                    '--type', encryption_provider,
                     '--cipher', encryption['cipher'],
                     '--key-size', str(encryption['key_size']),
                     '--key-file=-',
@@ -741,8 +740,12 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         urls = list(set([direct_url]
                         + [loc.get('url') for loc in locations or []]))
         image_volume_ids = self._extract_cinder_ids(urls)
-        image_volumes = self.db.volume_get_all_by_host(
-            context, volume['host'], filters={'id': image_volume_ids})
+        if self.driver.capabilities.get('clone_across_pools'):
+            image_volumes = self.db.volume_get_all(
+                context, filters={'id': image_volume_ids})
+        else:
+            image_volumes = self.db.volume_get_all_by_host(
+                context, volume['host'], filters={'id': image_volume_ids})
 
         for image_volume in image_volumes:
             # For the case image volume is stored in the service tenant,
@@ -1149,6 +1152,10 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
         try:
             ret = self.driver.create_volume_from_backup(volume, backup)
             need_update_volume = True
+            LOG.info("Created volume %(volume_id)s from backup %(backup_id)s "
+                     "successfully.",
+                     {'volume_id': volume.id,
+                      'backup_id': backup_id})
 
         except NotImplementedError:
             LOG.info("Backend does not support creating volume from "
@@ -1170,15 +1177,15 @@ class CreateVolumeFromSpecTask(flow_utils.CinderTask):
             backup.update(updates)
             backup.save()
 
+            LOG.info("Raw volume %(volume_id)s created.  Calling "
+                     "restore_backup %(backup_id)s to complete restoration.",
+                     {'volume_id': volume.id,
+                      'backup_id': backup_id})
             backuprpcapi = backup_rpcapi.BackupAPI()
             backuprpcapi.restore_backup(context, backup.host, backup,
-                                        volume.id)
+                                        volume.id, volume_is_new=True)
             need_update_volume = False
 
-        LOG.info("Created volume %(volume_id)s from backup %(backup_id)s "
-                 "successfully.",
-                 {'volume_id': volume.id,
-                  'backup_id': backup_id})
         return ret, need_update_volume
 
     def _create_raw_volume(self,
@@ -1290,6 +1297,7 @@ class CreateVolumeOnFinishTask(NotifyVolumeActionTask):
             'migration_target_creating': 'migration_target',
         }
 
+    @typing.no_type_check
     def execute(self, context, volume, volume_spec):
         need_update_volume = volume_spec.pop('need_update_volume', True)
         if not need_update_volume:
@@ -1371,8 +1379,7 @@ def get_flow(context, manager, db, driver, scheduler_rpcapi, host, volume,
     volume_flow.add(ExtractVolumeSpecTask(db))
     # Temporary volumes created during migration should not be notified
     end_notify_suffix = None
-    # TODO: (Y release) replace check with: if volume.use_quota:
-    if volume.use_quota or not volume.is_migration_target():
+    if volume.use_quota:
         volume_flow.add(NotifyVolumeActionTask(db, 'create.start'))
         end_notify_suffix = 'create.end'
     volume_flow.add(CreateVolumeFromSpecTask(manager,
