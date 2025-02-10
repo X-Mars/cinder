@@ -77,26 +77,33 @@ class TestVolumeCreateDeleteExtend(powerstore.TestPowerStoreDriver):
                 "PowerStoreClient.get_volume_mapped_hosts")
     @mock.patch("cinder.volume.drivers.dell_emc.powerstore.client."
                 "PowerStoreClient.delete_volume_or_snapshot")
+    @mock.patch("cinder.volume.drivers.dell_emc.powerstore.adapter."
+                "CommonAdapter._create_or_update_volume_qos_policy")
     def test_delete_volume_detach_not_found(self,
                                             mock_delete,
                                             mock_mapped_hosts,
-                                            mock_detach_request):
+                                            mock_detach_request,
+                                            mock_qos_policy):
         mock_mapped_hosts.return_value = ["fake_host_id"]
         mock_detach_request.return_value = powerstore.MockResponse(
             content={},
             rc=404
         )
         self.driver.delete_volume(self.volume)
+        mock_qos_policy.assert_not_called()
 
     @mock.patch("requests.request")
     @mock.patch("cinder.volume.drivers.dell_emc.powerstore.client."
                 "PowerStoreClient.get_volume_mapped_hosts")
     @mock.patch("cinder.volume.drivers.dell_emc.powerstore.client."
                 "PowerStoreClient.delete_volume_or_snapshot")
+    @mock.patch("cinder.volume.drivers.dell_emc.powerstore.adapter."
+                "CommonAdapter._create_or_update_volume_qos_policy")
     def test_delete_volume_detach_not_mapped(self,
                                              mock_delete,
                                              mock_mapped_hosts,
-                                             mock_detach_request):
+                                             mock_detach_request,
+                                             mock_qos_policy):
         mock_mapped_hosts.return_value = ["fake_host_id"]
         mock_detach_request.return_value = powerstore.MockResponse(
             content={
@@ -109,6 +116,7 @@ class TestVolumeCreateDeleteExtend(powerstore.TestPowerStoreDriver):
             rc=422
         )
         self.driver.delete_volume(self.volume)
+        mock_qos_policy.assert_not_called()
 
     @mock.patch("cinder.volume.drivers.dell_emc.powerstore.adapter."
                 "CommonAdapter._detach_volume_from_hosts")
@@ -149,3 +157,17 @@ class TestVolumeCreateDeleteExtend(powerstore.TestPowerStoreDriver):
                                   self.volume,
                                   16)
         self.assertIn("Failed to extend PowerStore volume", error.msg)
+
+    @mock.patch("requests.request")
+    def test_post_request_timeout_exception(self, mock_request):
+        mock_request.return_value = powerstore.MockResponse(
+            rc=501
+        )
+        error = self.assertRaises(exception.VolumeBackendAPIException,
+                                  self.driver.extend_volume,
+                                  self.volume,
+                                  16)
+        self.assertEqual('Bad or unexpected response from the '
+                         'storage volume backend API: Failed to '
+                         'extend PowerStore volume with id fake_id.',
+                         error.msg)

@@ -16,16 +16,15 @@
 
 """Handles all requests relating to volumes."""
 
-from __future__ import annotations
-
 import ast
 import collections
 import datetime
-from typing import (Any, DefaultDict, Iterable, Optional, Union)  # noqa: H301
+from typing import (Any, DefaultDict, Iterable, Optional, Union)
 
 from castellan import key_manager
 from oslo_config import cfg
 from oslo_log import log as logging
+from oslo_serialization import jsonutils
 from oslo_utils import excutils
 from oslo_utils import strutils
 from oslo_utils import timeutils
@@ -1675,6 +1674,48 @@ class API(base.Base):
                           target_obj=volume)
         self._extend(context, volume, new_size, attached=True)
 
+    def extend_volume_completion(self,
+                                 context: context.RequestContext,
+                                 volume: objects.Volume,
+                                 error: bool):
+        context.authorize(vol_action_policy.EXTEND_COMPLETE_POLICY,
+                          target_obj=volume)
+
+        if volume.status != 'extending':
+            msg = _('Volume is not being extended.')
+            raise exception.InvalidVolume(reason=msg)
+
+        try:
+            with volume.obj_as_admin():
+                new_size = int(volume.admin_metadata['extend_new_size'])
+                reservations = jsonutils.loads(
+                    volume.admin_metadata['extend_reservations'])
+        except (KeyError, ValueError, jsonutils.json.decoder.JSONDecodeError):
+            msg = _('Required volume admin metadata is malformed or missing.')
+            raise exception.InvalidVolume(reason=msg)
+
+        if new_size <= volume.size:
+            msg = _('The target volume size provided in volume admin metadata '
+                    '%(size)s is smaller or equal to the current volume size.'
+                    % volume.admin_metadata["extend_new_size"])
+            raise exception.InvalidVolume(reason=msg)
+
+        if type(reservations) is not list:
+            msg = _('The stored quota reservations for extending the volume '
+                    'must be in a list format.')
+            raise exception.InvalidVolume(reason=msg)
+
+        with volume.obj_as_admin():
+            del volume.admin_metadata['extend_new_size']
+            del volume.admin_metadata['extend_reservations']
+            volume.save()
+
+        self.volume_rpcapi.extend_volume_completion(context, volume, new_size,
+                                                    reservations, error)
+
+        LOG.info("Extend volume completion issued successfully.",
+                 resource=volume)
+
     def migrate_volume(self,
                        context: context.RequestContext,
                        volume: objects.Volume,
@@ -2675,7 +2716,22 @@ class API(base.Base):
                     'status': volume.status})
             raise exception.InvalidVolume(reason=msg)
         image_meta = self.image_service.show(context, image_id)
-        volume_utils.check_image_metadata(image_meta, volume['size'])
+        try:
+            volume_utils.check_image_metadata(image_meta, volume['size'])
+        # Currently we only raise InvalidInput and ImageUnacceptable
+        # exceptions in the check_image_metadata call but having Exception
+        # here makes it more generic since we want to roll back to original
+        # state in any case and we re-raise anyway.
+        # Also this helps makes adding new exceptions easier in the future.
+        except Exception:
+            with excutils.save_and_reraise_exception():
+                LOG.exception("Failed to reimage volume %(volume_id)s with "
+                              "image %(image_id)s",
+                              {'volume_id': volume.id, 'image_id': image_id})
+                volume.conditional_update(
+                    {'status': volume.model.previous_status,
+                     'previous_status': None},
+                    {'status': 'downloading'})
         self.volume_rpcapi.reimage(context,
                                    volume,
                                    image_meta)

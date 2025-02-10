@@ -47,7 +47,6 @@ from oslo_serialization import base64
 from oslo_service import loopingcall
 from oslo_utils import excutils
 from oslo_utils import units
-import six
 import taskflow.engines
 from taskflow.patterns import linear_flow
 
@@ -87,27 +86,30 @@ hpe3par_opts = [
     cfg.StrOpt('hpe3par_api_url',
                default='',
                help="WSAPI Server URL. "
-                    "This setting applies to: 3PAR, Primera and Alletra 9k "
+                    "This setting applies to: 3PAR, Primera, Alletra 9k and "
+                    "Alletra MP"
                     "\n       Example 1: for 3PAR, URL is: "
                     "\n       https://<3par ip>:8080/api/v1 "
-                    "\n       Example 2: for Primera/Alletra 9k, URL is: "
+                    "\n       Example 2: for Primera/Alletra 9k/Alletra MP, "
+                    "URL is: "
                     "\n       https://<primera ip>:443/api/v1"),
     cfg.StrOpt('hpe3par_username',
                default='',
-               help="3PAR/Primera/Alletra 9k username with the 'edit' role"),
+               help="3PAR/Primera/Alletra 9k/Alletra MP username with the "
+                    "'edit' role"),
     cfg.StrOpt('hpe3par_password',
                default='',
-               help="3PAR/Primera/Alletra 9k password for the user specified "
-                    "in hpe3par_username",
+               help="3PAR/Primera/Alletra 9k/Alletra MP password for the "
+                    "user specified in hpe3par_username",
                secret=True),
     cfg.ListOpt('hpe3par_cpg',
                 default=["OpenStack"],
-                help="List of the 3PAR/Primera/Alletra 9k CPG(s) to use for "
-                     "volume creation"),
+                help="List of the 3PAR/Primera/Alletra 9k/Alletra MP CPG(s) "
+                     "to use for volume creation"),
     cfg.StrOpt('hpe3par_cpg_snap',
                default="",
-               help="The 3PAR/Primera/Alletra 9k CPG to use for snapshots of "
-                    "volumes. If empty the userCPG will be used."),
+               help="The 3PAR/Primera/Alletra 9k/Alletra MP CPG to use for "
+                    "snapshots of volumes. If empty the userCPG will be used"),
     cfg.StrOpt('hpe3par_snapshot_retention',
                default="",
                help="The time in hours to retain a snapshot.  "
@@ -118,7 +120,8 @@ hpe3par_opts = [
                     " and is deleted.  This must be larger than expiration"),
     cfg.BoolOpt('hpe3par_debug',
                 default=False,
-                help="Enable HTTP debugging to 3PAR/Primera/Alletra 9k"),
+                help="Enable HTTP debugging to 3PAR/Primera/Alletra 9k/"
+                     "Alletra MP"),
     cfg.ListOpt('hpe3par_iscsi_ips',
                 default=[],
                 help="List of target iSCSI addresses to use."),
@@ -127,9 +130,9 @@ hpe3par_opts = [
                 help="Enable CHAP authentication for iSCSI connections."),
     cfg.StrOpt('hpe3par_target_nsp',
                default="",
-               help="The nsp of 3PAR/Primera/Alletra 9k backend to be used "
-                    "when: (1) multipath is not enabled in cinder.conf. "
-                    "(2) Fiber Channel Zone Manager is not used. "
+               help="The nsp of 3PAR/Primera/Alletra 9k/Alletra MP backend to "
+                    "be used when: (1) multipath is not enabled in cinder.conf"
+                    ". (2) Fiber Channel Zone Manager is not used. "
                     "(3) the backend is prezoned with this "
                     "specific nsp only. For example if nsp is 2 1 2, the "
                     "format of the option's value is 2:1:2"),
@@ -305,11 +308,16 @@ class HPE3PARCommon(object):
                  error out if it has child snapshot(s). Bug #1994521
         4.0.19 - Update code to work with new WSAPI (of 2023). Bug #2015746
         4.0.20 - Use small QoS Latency value. Bug #2018994
+        4.0.21 - Fix issue seen during retype/migrate. Bug #2026718
+        4.0.22 - Fixed clone of replicated volume. Bug #2021941
+        4.0.23 - Fixed login/logout while accessing wsapi. Bug #2068795
+        4.0.24 - Fixed retype volume - thin to deco. Bug #2080927
+        4.0.25 - Update the calculation of free_capacity
 
 
     """
 
-    VERSION = "4.0.20"
+    VERSION = "4.0.25"
 
     stats = {}
 
@@ -431,8 +439,9 @@ class HPE3PARCommon(object):
             raise exception.InvalidInput(reason=msg)
 
     def client_logout(self):
-        LOG.debug("Disconnect from 3PAR REST and SSH %s", self.uuid)
-        self.client.logout()
+        if self.client is not None:
+            LOG.debug("Disconnect from 3PAR REST and SSH %s", self.uuid)
+            self.client.logout()
 
     def _create_replication_client(self, remote_array):
         try:
@@ -465,6 +474,7 @@ class HPE3PARCommon(object):
             # case of a fail-over.
             self._get_3par_config(array_id=array_id)
             self.client = self._create_client(timeout=timeout)
+            self.client_login()
             wsapi_version = self.client.getWsApiVersion()
             self.API_VERSION = wsapi_version['build']
 
@@ -486,6 +496,8 @@ class HPE3PARCommon(object):
             if self._replication_enabled:
                 self.client = None
             raise exception.InvalidInput(ex)
+        finally:
+            self.client_logout()
 
         if context:
             # The context is None except at driver startup.
@@ -509,7 +521,7 @@ class HPE3PARCommon(object):
             try:
                 self.client_login()
                 info = self.client.getStorageSystemInfo()
-                self.client.id = six.text_type(info['id'])
+                self.client.id = str(info['id'])
             except Exception:
                 self.client.id = 0
             finally:
@@ -630,7 +642,7 @@ class HPE3PARCommon(object):
                 'replication_status': fields.ReplicationStatus.ENABLED})
 
         self.client.createVolumeSet(cg_name, domain=domain,
-                                    comment=six.text_type(extra))
+                                    comment=str(extra))
 
         return model_update
 
@@ -674,7 +686,7 @@ class HPE3PARCommon(object):
         for i in range(0, len(volumes)):
             # In case of group created from group,we are mapping
             # source volume with it's snapshot
-            snap_name = snap_base + "-" + six.text_type(i)
+            snap_name = snap_base + "-" + str(i)
             snap_detail = self.client.getVolume(snap_name)
             vol_name = snap_detail.get('copyOf')
             src_vol_name = vol_name
@@ -917,7 +929,7 @@ class HPE3PARCommon(object):
                                                   optional=optional)
         except Exception as ex:
             msg = (_('There was an error creating the cgsnapshot: %s'),
-                   six.text_type(ex))
+                   str(ex))
             LOG.error(msg)
             raise exception.InvalidInput(reason=msg)
 
@@ -941,7 +953,7 @@ class HPE3PARCommon(object):
         for i, snapshot in enumerate(snapshots):
             snapshot_update = {'id': snapshot['id']}
             try:
-                snap_name = cgsnap_name + "-" + six.text_type(i)
+                snap_name = cgsnap_name + "-" + str(i)
                 self.client.deleteVolume(snap_name)
                 snapshot_update['status'] = fields.SnapshotStatus.DELETED
             except hpeexceptions.HTTPNotFound as ex:
@@ -955,7 +967,7 @@ class HPE3PARCommon(object):
                 LOG.error("There was an error deleting snapshot %(id)s: "
                           "%(error)s.",
                           {'id': snapshot['id'],
-                           'error': six.text_type(ex)})
+                           'error': str(ex)})
                 snapshot_update['status'] = fields.SnapshotStatus.ERROR
             snapshot_model_updates.append(snapshot_update)
 
@@ -1473,13 +1485,26 @@ class HPE3PARCommon(object):
 
     # v2 replication conversion
     def _get_3par_rcg_name(self, volume):
-        rcg_name = self._encode_name(volume.get('_name_id') or volume['id'])
-        rcg = "rcg-%s" % rcg_name
-        return rcg[:22]
+        # if non-replicated volume is retyped or migrated to replicated vol,
+        # then rcg_name is different. Try to get that new rcg_name.
+        if volume['migration_status'] == 'success':
+            vol_name = self._get_3par_vol_name(volume)
+            vol_details = self.client.getVolume(vol_name)
+            rcg_name = vol_details.get('rcopyGroup')
+
+            LOG.debug("new rcg_name: %(name)s",
+                      {'name': rcg_name})
+            return rcg_name
+        else:
+            # by default, rcg_name is similar to volume name
+            rcg_name = self._encode_name(volume.get('_name_id')
+                                         or volume['id'])
+            rcg = "rcg-%s" % rcg_name
+            return rcg[:22]
 
     def _get_3par_remote_rcg_name(self, volume, provider_location):
         return self._get_3par_rcg_name(volume) + ".r" + (
-            six.text_type(provider_location))
+            str(provider_location))
 
     @staticmethod
     def _encode_name(name):
@@ -1574,7 +1599,7 @@ class HPE3PARCommon(object):
         """We have to use a safe hostname length for 3PAR host names."""
         hostname = connector['host']
         unique_fqdn_network = configuration.unique_fqdn_network
-        if(not unique_fqdn_network and connector.get('initiator')):
+        if (not unique_fqdn_network and connector.get('initiator')):
             iqn = connector.get('initiator')
             iqn = iqn.replace(":", "-")
             return iqn[::-1][:31]
@@ -1735,8 +1760,6 @@ class HPE3PARCommon(object):
                     # cpg usable free space
                     cpg_avail_space = (
                         self.client.getCPGAvailableSpace(cpg_name))
-                    free_capacity = int(
-                        cpg_avail_space['usableFreeMiB'] * const)
                     # total_capacity is the best we can do for a limitless cpg
                     total_capacity = int(
                         (cpg['SDUsage']['usedMiB'] +
@@ -1744,16 +1767,15 @@ class HPE3PARCommon(object):
                          cpg_avail_space['usableFreeMiB']) * const)
                 else:
                     total_capacity = int(cpg['SDGrowth']['limitMiB'] * const)
-                    free_capacity = int((cpg['SDGrowth']['limitMiB'] -
-                                        (cpg['UsrUsage']['usedMiB'] +
-                                         cpg['SDUsage']['usedMiB'])) * const)
-                capacity_utilization = (
-                    (float(total_capacity - free_capacity) /
-                     float(total_capacity)) * 100)
+
                 provisioned_capacity = int((cpg['UsrUsage']['totalMiB'] +
                                             cpg['SAUsage']['totalMiB'] +
                                             cpg['SDUsage']['totalMiB']) *
                                            const)
+                free_capacity = total_capacity - provisioned_capacity
+                capacity_utilization = (
+                    (float(total_capacity - free_capacity) /
+                     float(total_capacity)) * 100)
 
             except hpeexceptions.HTTPNotFound:
                 err = (_("CPG (%s) doesn't exist on array")
@@ -1990,7 +2012,7 @@ class HPE3PARCommon(object):
     def _get_boolean_key_value(self, hpe3par_keys, key, default=False):
         value = self._get_key_value(
             hpe3par_keys, key, default)
-        if isinstance(value, six.string_types):
+        if isinstance(value, str):
             if value.lower() == 'true':
                 value = True
             else:
@@ -2367,7 +2389,7 @@ class HPE3PARCommon(object):
 
         return volume_settings
 
-    def create_volume(self, volume):
+    def create_volume(self, volume, perform_replica=True):
         LOG.debug('CREATE VOLUME (%(disp_name)s: %(vol_name)s %(id)s on '
                   '%(host)s)',
                   {'disp_name': volume['display_name'],
@@ -2465,10 +2487,11 @@ class HPE3PARCommon(object):
                     LOG.error("Exception: %s", ex)
                     raise exception.CinderException(ex)
 
-            if (self._volume_of_replicated_type(volume,
-                                                hpe_tiramisu_check=True)
-               and self._do_volume_replication_setup(volume)):
-                replication_flag = True
+            if perform_replica:
+                if (self._volume_of_replicated_type(volume,
+                                                    hpe_tiramisu_check=True)
+                   and self._do_volume_replication_setup(volume)):
+                    replication_flag = True
 
         except hpeexceptions.HTTPConflict:
             msg = _("Volume (%s) already exists on array") % volume_name
@@ -2610,13 +2633,17 @@ class HPE3PARCommon(object):
             if str(src_vref['status']) == 'backing-up':
                 back_up_process = True
 
-            # if the sizes of the 2 volumes are the same and except backup
-            # process for ISCSI volume with chap enabled on it.
+            # (i) if the sizes of the 2 volumes are the same and
+            # (ii) this is not a backup process for ISCSI volume with chap
+            #      enabled on it and
+            #  (iii) volume is not replicated
             # we can do an online copy, which is a background process
             # on the 3PAR that makes the volume instantly available.
             # We can't resize a volume, while it's being copied.
             if volume['size'] == src_vref['size'] and not (
-               back_up_process and vol_chap_enabled):
+               back_up_process and vol_chap_enabled) and not (
+                self._volume_of_replicated_type(volume,
+                                                hpe_tiramisu_check=True)):
                 LOG.debug("Creating a clone of volume, using online copy.")
 
                 type_info = self.get_volume_settings_from_type(volume)
@@ -2646,24 +2673,17 @@ class HPE3PARCommon(object):
                         self.client.deleteVolume(vol_name)
                         dbg = {'volume': vol_name,
                                'vvs_name': vvs_name,
-                               'err': six.text_type(ex)}
+                               'err': str(ex)}
                         msg = _("Failed to add volume '%(volume)s' to vvset "
                                 "'%(vvs_name)s' because '%(err)s'") % dbg
                         LOG.error(msg)
                         raise exception.CinderException(msg)
 
-                # v2 replication check
-                replication_flag = False
-                if (self._volume_of_replicated_type(volume,
-                                                    hpe_tiramisu_check=True)
-                   and self._do_volume_replication_setup(volume)):
-                    replication_flag = True
-
                 if self._volume_of_hpe_tiramisu_type(volume):
                     hpe_tiramisu = True
 
                 return self._get_model_update(volume['host'], cpg,
-                                              replication=replication_flag,
+                                              replication=False,
                                               provider_location=self.client.id,
                                               hpe_tiramisu=hpe_tiramisu)
             else:
@@ -2673,7 +2693,8 @@ class HPE3PARCommon(object):
                 LOG.debug("Creating a clone of volume, using non-online copy.")
 
                 # we first have to create the destination volume
-                model_update = self.create_volume(volume)
+                model_update = self.create_volume(volume,
+                                                  perform_replica=False)
 
                 optional = {'priority': 1}
                 body = self.client.copyVolume(src_vol_name, vol_name, None,
@@ -2690,6 +2711,24 @@ class HPE3PARCommon(object):
                     LOG.debug('Copy volume completed: create_cloned_volume: '
                               'id=%s.', volume['id'])
 
+                # v2 replication check
+                LOG.debug("v2 replication check")
+                replication_flag = False
+                if (self._volume_of_replicated_type(volume,
+                                                    hpe_tiramisu_check=True)
+                   and self._do_volume_replication_setup(volume)):
+                    replication_flag = True
+                    type_info = self.get_volume_settings_from_type(volume)
+                    cpg = type_info['cpg']
+                    model_update = self._get_model_update(
+                        volume['host'], cpg,
+                        replication=True,
+                        provider_location=self.client.id,
+                        hpe_tiramisu=hpe_tiramisu)
+
+                LOG.debug("replication_flag: %(flag)s",
+                          {'flag': replication_flag})
+
                 return model_update
 
         except hpeexceptions.HTTPForbidden:
@@ -2701,6 +2740,10 @@ class HPE3PARCommon(object):
             raise exception.CinderException(ex)
 
     def delete_volume(self, volume):
+        vol_id = volume.id
+        name_id = volume.get('_name_id')
+        LOG.debug("DELETE volume vol_id: %(vol_id)s, name_id: %(name_id)s",
+                  {'vol_id': vol_id, 'name_id': name_id})
 
         @utils.retry(exception.VolumeIsBusy, interval=2, retries=10)
         def _try_remove_volume(volume_name):
@@ -2716,15 +2759,30 @@ class HPE3PARCommon(object):
         # If the volume type is replication enabled, we want to call our own
         # method of deconstructing the volume and its dependencies
         if self._volume_of_replicated_type(volume, hpe_tiramisu_check=True):
+            LOG.debug("volume is of replicated_type")
             replication_status = volume.get('replication_status', None)
-            if replication_status and replication_status == "failed-over":
-                self._delete_replicated_failed_over_volume(volume)
-            else:
-                self._do_volume_replication_destroy(volume)
-            return
+            LOG.debug("replication_status: %(status)s",
+                      {'status': replication_status})
+            if replication_status:
+                if replication_status == "failed-over":
+                    self._delete_replicated_failed_over_volume(volume)
+                else:
+                    self._do_volume_replication_destroy(volume)
+                return
 
+        volume_name = self._get_3par_vol_name(volume)
+
+        # during retype/migrate
+        if (self._volume_of_replicated_type(volume, hpe_tiramisu_check=True)
+           and volume['migration_status'] == 'deleting'):
+            # don't use current osv_name (which was from name_id)
+            # get new osv_name from id
+            LOG.debug("get osv_name from volume id")
+            volume_name = self._encode_name(volume.id)
+            volume_name = "osv-" + volume_name
+
+        LOG.debug("volume_name: %(name)s", {'name': volume_name})
         try:
-            volume_name = self._get_3par_vol_name(volume)
             # Try and delete the volume, it might fail here because
             # the volume is part of a volume set which will have the
             # volume set name in the error.
@@ -3083,6 +3141,39 @@ class HPE3PARCommon(object):
                 log_error('original', e, temp_name, current_name, temp_name)
         return True
 
+    def _rename_migrated_vvset(self, src_volume, dest_volume):
+        """Rename the vvsets after a migration.
+
+        """
+        vvs_name_src = self._get_3par_vvs_name(src_volume['id'])
+        vvs_name_dest = self._get_3par_vvs_name(dest_volume['id'])
+
+        # There can be parallel execution. Ensure that temp_vvs_name is unique
+        # eg. if vvs_name_src is: vvs-DK3sEwkPTCqVHdHKHtwZBA
+        # then temp_vvs_name is : tos-DK3sEwkPTCqVHdHKHtwZBA
+        temp_vvs_name = 'tos-' + vvs_name_src[4:]
+
+        try:
+            self.client.modifyVolumeSet(vvs_name_dest, newName=temp_vvs_name)
+            LOG.debug("Renamed vvset %(old)s to %(new)s",
+                      {'old': vvs_name_dest, 'new': temp_vvs_name})
+        except Exception as ex:
+            LOG.error("exception: %(details)s", {'details': str(ex)})
+
+        try:
+            self.client.modifyVolumeSet(vvs_name_src, newName=vvs_name_dest)
+            LOG.debug("Renamed vvset %(old)s to %(new)s",
+                      {'old': vvs_name_src, 'new': vvs_name_dest})
+        except Exception as ex:
+            LOG.error("exception: %(details)s", {'details': str(ex)})
+
+        try:
+            self.client.modifyVolumeSet(temp_vvs_name, newName=vvs_name_src)
+            LOG.debug("Renamed vvset %(old)s to %(new)s",
+                      {'old': temp_vvs_name, 'new': vvs_name_src})
+        except Exception as ex:
+            LOG.error("exception: %(details)s", {'details': str(ex)})
+
     def update_migrated_volume(self, context, volume, new_volume,
                                original_volume_status):
         """Rename the new (temp) volume to it's original name.
@@ -3114,6 +3205,13 @@ class HPE3PARCommon(object):
             current_name = self._get_3par_vol_name(new_volume)
             self._update_comment(current_name, volume_id=volume['id'],
                                  _name_id=name_id)
+
+        if new_volume_renamed:
+            type_info = self.get_volume_settings_from_type(volume)
+            qos = type_info['qos']
+            if qos:
+                # rename the vvsets as per volume names
+                self._rename_migrated_vvset(volume, new_volume)
 
         return {'_name_id': name_id, 'provider_location': provider_location}
 
@@ -3524,6 +3622,8 @@ class HPE3PARCommon(object):
                          "with userCPG=%(new_cpg)s",
                          {'volume_name': volume_name, 'new_cpg': new_cpg})
 
+            response = None
+            body = None
             try:
                 if self.API_VERSION < COMPRESSION_API_VERSION:
                     response, body = self.client.modifyVolume(
@@ -3533,15 +3633,18 @@ class HPE3PARCommon(object):
                          'userCPG': new_cpg,
                          'conversionOperation': cop})
                 else:
-                    response, body = self.client.modifyVolume(
+                    LOG.debug("compression: %(compression)s",
+                              {'compression': compression})
+                    body = self.client.tuneVolume(
                         volume_name,
+                        1,
                         {'action': 6,
-                         'tuneOperation': 1,
                          'userCPG': new_cpg,
                          'compression': compression,
                          'conversionOperation': cop})
+                    LOG.debug("body: %(body)s", {'body': body})
             except hpeexceptions.HTTPBadRequest as ex:
-                if ex.get_code() == 40 and "keepVV" in six.text_type(ex):
+                if ex.get_code() == 40 and "keepVV" in str(ex):
                     # Cannot retype with snapshots because we don't want to
                     # use keepVV and have straggling volumes.  Log additional
                     # info and then raise.
@@ -3697,7 +3800,7 @@ class HPE3PARCommon(object):
         old_tpvv = old_volume_info['provisioningType'] == self.THIN
         old_tdvv = old_volume_info['provisioningType'] == self.DEDUP
         old_cpg = old_volume_info['userCPG']
-        old_comment = old_volume_info['comment']
+        old_comment = old_volume_info.get('comment')
         old_snap_cpg = None
         if 'snapCPG' in old_volume_info:
             old_snap_cpg = old_volume_info['snapCPG']
@@ -3804,7 +3907,7 @@ class HPE3PARCommon(object):
                 self.client.stopRemoteCopy(rcg_name)
             except Exception as ex:
                 msg = (_("There was an error stopping remote copy: %s.") %
-                       six.text_type(ex))
+                       str(ex))
                 LOG.error(msg)
                 raise exception.VolumeBackendAPIException(data=msg)
 
@@ -3832,7 +3935,7 @@ class HPE3PARCommon(object):
                 self.client.startRemoteCopy(rcg_name)
             except Exception as ex:
                 msg = (_("There was an error starting remote copy: %s.") %
-                       six.text_type(ex))
+                       str(ex))
                 LOG.error(msg)
                 raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4094,9 +4197,9 @@ class HPE3PARCommon(object):
                 try:
                     cl = self._create_replication_client(remote_array)
                     info = cl.getStorageSystemInfo()
-                    remote_array['id'] = six.text_type(info['id'])
+                    remote_array['id'] = str(info['id'])
                     if array_id and array_id == info['id']:
-                        self._active_backend_id = six.text_type(info['name'])
+                        self._active_backend_id = str(info['name'])
 
                     wsapi_version = cl.getWsApiVersion()['build']
 
@@ -4429,7 +4532,7 @@ class HPE3PARCommon(object):
             except Exception as ex:
                 msg = (_("There was an error creating the remote copy "
                          "group: %s.") %
-                       six.text_type(ex))
+                       str(ex))
                 LOG.error(msg)
                 raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4451,7 +4554,7 @@ class HPE3PARCommon(object):
             except Exception as ex:
                 msg = (_("There was an error adding the volume to the remote "
                          "copy group: %s.") %
-                       six.text_type(ex))
+                       str(ex))
                 LOG.error(msg)
                 raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4465,7 +4568,7 @@ class HPE3PARCommon(object):
                 except Exception as ex:
                     msg = (_("There was an error setting the sync period for "
                              "the remote copy group: %s.") %
-                           six.text_type(ex))
+                           str(ex))
                     LOG.error(msg)
                     raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4486,7 +4589,7 @@ class HPE3PARCommon(object):
                         self.client.modifyRemoteCopyGroup(rcg_name, pp_params)
                     except Exception as ex:
                         msg = (_("There was an error while modifying remote "
-                                 "copy group: %s.") % six.text_type(ex))
+                                 "copy group: %s.") % str(ex))
                         LOG.error(msg)
                         raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4495,17 +4598,17 @@ class HPE3PARCommon(object):
                 self.client.startRemoteCopy(rcg_name)
             except Exception as ex:
                 msg = (_("There was an error starting remote copy: %s.") %
-                       six.text_type(ex))
+                       str(ex))
                 LOG.error(msg)
                 raise exception.VolumeBackendAPIException(data=msg)
 
             return True
         except Exception as ex:
-            self._do_volume_replication_destroy(volume)
+            self._do_volume_replication_destroy(volume, retype=retype)
             msg = (_("There was an error setting up a remote copy group "
                      "on the 3PAR arrays: ('%s'). The volume will not be "
                      "recognized as replication type.") %
-                   six.text_type(ex))
+                   str(ex))
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4573,7 +4676,7 @@ class HPE3PARCommon(object):
             self._do_volume_replication_destroy(volume, rcg_name)
         except Exception as ex:
             msg = (_("The failed-over volume could not be deleted: %s") %
-                   six.text_type(ex))
+                   str(ex))
             LOG.error(msg)
             raise exception.VolumeIsBusy(message=msg)
         finally:
@@ -4586,20 +4689,29 @@ class HPE3PARCommon(object):
     def _delete_vvset(self, volume):
 
         # volume is part of a volume set.
+        LOG.debug("_delete_vvset. vol_id: %(id)s", {'id': volume['id']})
         volume_name = self._get_3par_vol_name(volume)
-        vvset_name = self.client.findVolumeSet(volume_name)
-        LOG.debug("Returned vvset_name = %s", vvset_name)
-        if vvset_name is not None:
-            if vvset_name.startswith('vvs-'):
-                # We have a single volume per volume set, so
-                # remove the volume set.
-                self.client.deleteVolumeSet(
-                    self._get_3par_vvs_name(volume['id']))
-            else:
-                # We have a pre-defined volume set just remove the
-                # volume and leave the volume set.
-                self.client.removeVolumeFromVolumeSet(vvset_name,
-                                                      volume_name)
+        vvset_name = self._get_3par_vvs_name(volume['id'])
+
+        try:
+            # find vvset
+            self.client.getVolumeSet(vvset_name)
+
+            # (a) vvset is found:
+            # We have a single volume per volume set, so
+            # remove the volume set.
+            LOG.debug("Deleting vvset: %(name)s", {'name': vvset_name})
+            self.client.deleteVolumeSet(vvset_name)
+
+        except hpeexceptions.HTTPNotFound:
+            # (b) vvset not found:
+            # - find the vvset name from volume name
+            # - remove the volume and leave the vvset
+            vvset_name = self.client.findVolumeSet(volume_name)
+
+            LOG.debug("Removing vol %(volume_name)s from vvset %(vvset_name)s",
+                      {'volume_name': volume_name, 'vvset_name': vvset_name})
+            self.client.removeVolumeFromVolumeSet(vvset_name, volume_name)
 
     def _get_3par_rcg_name_of_group(self, group_id):
         rcg_name = self._encode_name(group_id)
@@ -4608,7 +4720,7 @@ class HPE3PARCommon(object):
 
     def _get_3par_remote_rcg_name_of_group(self, group_id, provider_location):
         return self._get_3par_rcg_name_of_group(group_id) + ".r" + (
-            six.text_type(provider_location))
+            str(provider_location))
 
     def _get_hpe3par_tiramisu_value(self, volume_type):
         hpe3par_tiramisu = False
@@ -4638,7 +4750,7 @@ class HPE3PARCommon(object):
             self.client.startRemoteCopy(rcg_name)
         except Exception as ex:
             msg = (_("There was an error starting remote copy: %s.") %
-                   six.text_type(ex))
+                   str(ex))
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4752,7 +4864,7 @@ class HPE3PARCommon(object):
             msg = (_("There was an error removing a volume: %(volume)s from "
                      "Group: %(group)s : %(err)s") %
                    {'volume': volume.get('id'), 'group': group.id,
-                    'err': six.text_type(ex)})
+                    'err': str(ex)})
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4782,7 +4894,7 @@ class HPE3PARCommon(object):
             msg = (_("There was an error adding a volume: %(volume)s to "
                      "Group: %(group)s : %(err)s") %
                    {'volume': volume.get('id'), 'group': group.id,
-                    'err': six.text_type(ex)})
+                    'err': str(ex)})
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4813,7 +4925,7 @@ class HPE3PARCommon(object):
                 except Exception as ex:
                     msg = (_("There was an error setting the sync period for "
                              "the remote copy group: %s.") %
-                           six.text_type(ex))
+                           str(ex))
                     LOG.error(msg)
                     raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4841,7 +4953,7 @@ class HPE3PARCommon(object):
         except Exception as ex:
             msg = (_("There was an error modifying the remote copy "
                      "group: %s.") %
-                   six.text_type(ex))
+                   str(ex))
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4863,7 +4975,7 @@ class HPE3PARCommon(object):
         except Exception as ex:
             msg = (_("There was an error adding the volume to the remote "
                      "copy group: %s.") %
-                   six.text_type(ex))
+                   str(ex))
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
@@ -4982,7 +5094,7 @@ class HPE3PARCommon(object):
         except Exception as ex:
             msg = (_("There was an error creating the remote copy "
                      "group: %s.") %
-                   six.text_type(ex))
+                   str(ex))
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
@@ -5025,7 +5137,7 @@ class HPE3PARCommon(object):
         except Exception as ex:
             msg = (_("There was a problem with the failover: "
                      "(%(error)s) and it was unsuccessful.") %
-                   {'err': six.text_type(ex)})
+                   {'err': str(ex)})
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
         finally:
@@ -5041,7 +5153,7 @@ class HPE3PARCommon(object):
         except Exception as ex:
             msg = (_("There was a problem with the failback: "
                      "(%(error)s) and it was unsuccessful.") %
-                   {'err': six.text_type(ex)})
+                   {'err': str(ex)})
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
         finally:
@@ -5324,7 +5436,10 @@ class ModifyVolumeTask(flow_utils.CinderTask):
                          new_type_name, new_type_id):
 
         # Modify the comment during ModifyVolume
-        comment_dict = dict(ast.literal_eval(old_comment))
+        if not old_comment:
+            comment_dict = {}
+        else:
+            comment_dict = dict(ast.literal_eval(old_comment))
         if 'vvs' in comment_dict:
             del comment_dict['vvs']
         if 'qos' in comment_dict:

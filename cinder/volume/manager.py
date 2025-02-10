@@ -35,12 +35,10 @@ intact.
 
 """
 
-from __future__ import annotations  # Remove when only supporting Python 3.9+
-
 import functools
 import time
 import typing
-from typing import Any, Optional, Union  # noqa: H301
+from typing import Any, Optional, Union
 
 from castellan import key_manager
 from oslo_config import cfg
@@ -356,7 +354,8 @@ class VolumeManager(manager.CleanableManager,
                 self.db,
                 cinder_volume.API(),
                 max_cache_size,
-                max_cache_entries
+                max_cache_entries,
+                self.driver.capabilities.get('clone_across_pools', False)
             )
             LOG.info('Image-volume cache enabled for host %(host)s.',
                      {'host': self.host})
@@ -982,19 +981,7 @@ class VolumeManager(manager.CleanableManager,
         # and should not modify it when deleted.  These temporary volumes are
         # created for volume migration between backends and for backups (from
         # in-use volume or snapshot).
-        # TODO: (Y release) replace until the if do_quota (including comments)
-        #       with: do_quota = volume.use_quota
-        # The status 'deleting' is not included, because it only applies to
-        # the source volume to be deleted after a migration. No quota
-        # needs to be handled for it.
-        is_migrating = volume.migration_status not in (None, 'error',
-                                                       'success')
-        # Get admin_metadata (needs admin context) to detect temporary volume.
-        with volume.obj_as_admin():
-            do_quota = not (volume.use_quota is False or is_migrating or
-                            volume.admin_metadata.get('temporary') == 'True')
-
-        if do_quota:
+        if volume.use_quota:
             notification = 'unmanage.' if unmanage_only else 'delete.'
             self._notify_about_volume_usage(context, volume,
                                             notification + 'start')
@@ -1043,7 +1030,7 @@ class VolumeManager(manager.CleanableManager,
 
         # If deleting source/destination volume in a migration or a temp
         # volume for backup, we should skip quotas.
-        if do_quota:
+        if volume.use_quota:
             # Get reservations
             try:
                 reservations = None
@@ -1064,7 +1051,7 @@ class VolumeManager(manager.CleanableManager,
 
         # If deleting source/destination volume in a migration or a temp
         # volume for backup, we should skip quotas.
-        if do_quota:
+        if volume.use_quota:
             self._notify_about_volume_usage(context, volume,
                                             notification + 'end')
             # Commit the reservations
@@ -1884,7 +1871,7 @@ class VolumeManager(manager.CleanableManager,
         # Add cacheable flag to connection_info if not set in the driver.
         if typeid:
             cacheable = volume_types.get_volume_type_extra_specs(
-                typeid, key='cacheable')
+                typeid).get('cacheable')
             if conn_info['data'].get('cacheable') is not None:
                 driver_setting = bool(conn_info['data']['cacheable'])
                 # override a True driver_setting but respect False
@@ -1993,6 +1980,8 @@ class VolumeManager(manager.CleanableManager,
             raise exception.VolumeBackendAPIException(data=err_msg)
 
         conn_info = self._parse_connection_options(context, volume, conn_info)
+        conn_info['data']['enforce_multipath'] = connector.get(
+            'enforce_multipath', False)
         LOG.info("Initialize volume connection completed successfully.",
                  resource=volume)
         return conn_info
@@ -2053,6 +2042,8 @@ class VolumeManager(manager.CleanableManager,
                 LOG.error(ex_msg)
                 raise exception.VolumeBackendAPIException(data=ex_msg)
             raise exception.VolumeBackendAPIException(data=err_msg)
+        conn['data']['enforce_multipath'] = connector.get(
+            'enforce_multipath', False)
 
         LOG.info("Initialize snapshot connection completed successfully.",
                  resource=snapshot)
@@ -2622,35 +2613,12 @@ class VolumeManager(manager.CleanableManager,
                  resource=volume)
         return volume.id
 
-    def _can_use_driver_migration(self, diff):
-        """Return when we can use driver assisted migration on a retype."""
-        # We can if there's no retype or there are no difference in the types
-        if not diff:
-            return True
-
-        extra_specs = diff.get('extra_specs')
-        qos = diff.get('qos_specs')
-        enc = diff.get('encryption')
-
-        # We cant' if QoS or Encryption changes and we can if there are no
-        # extra specs changes.
-        if qos or enc or not extra_specs:
-            return not (qos or enc)
-
-        # We can use driver assisted migration if we only change the backend
-        # name, and the AZ.
-        extra_specs = extra_specs.copy()
-        extra_specs.pop('volume_backend_name', None)
-        extra_specs.pop('RESKEY:availability_zones', None)
-        return not extra_specs
-
     def migrate_volume(self,
                        ctxt: context.RequestContext,
                        volume,
                        host,
                        force_host_copy: bool = False,
-                       new_type_id=None,
-                       diff=None) -> None:
+                       new_type_id=None) -> None:
         """Migrate the volume to the specified host (called on source host)."""
         try:
             volume_utils.require_driver_initialized(self.driver)
@@ -2668,7 +2636,7 @@ class VolumeManager(manager.CleanableManager,
 
         volume.migration_status = 'migrating'
         volume.save()
-        if not force_host_copy and self._can_use_driver_migration(diff):
+        if not force_host_copy and new_type_id is None:
             try:
                 LOG.debug("Issue driver.migrate_volume.", resource=volume)
                 moved, model_update = self.driver.migrate_volume(ctxt,
@@ -2687,8 +2655,6 @@ class VolumeManager(manager.CleanableManager,
                         updates.update(status_update)
                     if model_update:
                         updates.update(model_update)
-                    if new_type_id:
-                        updates['volume_type_id'] = new_type_id
                     volume.update(updates)
                     volume.save()
             except Exception:
@@ -2947,8 +2913,6 @@ class VolumeManager(manager.CleanableManager,
                 volume.status = 'error_extending'
                 volume.save()
 
-        project_id = volume.project_id
-        size_increase = (int(new_size)) - volume.size
         self._notify_about_volume_usage(context, volume, "resize.start")
         try:
             self.driver.extend_volume(volume, new_size)
@@ -2958,6 +2922,38 @@ class VolumeManager(manager.CleanableManager,
         except Exception:
             LOG.exception("Extend volume failed.",
                           resource=volume)
+            self.extend_volume_completion(context, volume, new_size,
+                                          reservations, error=True)
+            return
+
+        self.extend_volume_completion(context, volume, new_size,
+                                      reservations, error=False)
+
+        attachments = volume.volume_attachment or []
+        # If instance_uuid field is None on attachment, it means that the
+        # volume is used by Glance Cinder store
+        instance_uuids = [attachment.instance_uuid
+                          for attachment in attachments
+                          if attachment.instance_uuid]
+
+        # If the volume is not attached to any instances, we should not send
+        # external events to Nova
+        if instance_uuids:
+            nova_api = compute.API()
+            nova_api.extend_volume(context, instance_uuids, volume.id)
+
+    def extend_volume_completion(self,
+                                 context: context.RequestContext,
+                                 volume: objects.Volume,
+                                 new_size: int,
+                                 reservations: list[str],
+                                 error: bool) -> None:
+
+        project_id = volume.project_id
+        size_increase = new_size - volume.size
+
+        if error:
+            LOG.error("Failed to extend volume.", resource=volume)
             self.message_api.create(
                 context,
                 message_field.Action.EXTEND_VOLUME,
@@ -2975,26 +2971,13 @@ class VolumeManager(manager.CleanableManager,
 
         QUOTAS.commit(context, reservations, project_id=project_id)
 
-        attachments = volume.volume_attachment
-        if not attachments:
+        if not volume.volume_attachment:
             orig_volume_status = 'available'
         else:
             orig_volume_status = 'in-use'
 
         volume.update({'size': int(new_size), 'status': orig_volume_status})
         volume.save()
-
-        if orig_volume_status == 'in-use':
-            nova_api = compute.API()
-            # If instance_uuid field is None on attachment, it means the
-            # request is coming from glance and not nova
-            instance_uuids = [attachment.instance_uuid
-                              for attachment in attachments
-                              if attachment.instance_uuid]
-            # If we are using glance cinder store, we should not send any
-            # external events to nova
-            if instance_uuids:
-                nova_api.extend_volume(context, instance_uuids, volume.id)
 
         pool = volume_utils.extract_host(volume.host, 'pool')
         if pool is None:
@@ -3099,7 +3082,7 @@ class VolumeManager(manager.CleanableManager,
                                              host)
                 # Check if the driver retype provided a model update or
                 # just a retype indication
-                if type(ret) == tuple:
+                if type(ret) is tuple:
                     retyped, retype_model_update = ret
                 else:
                     retyped = ret
@@ -3132,7 +3115,7 @@ class VolumeManager(manager.CleanableManager,
 
             # Don't allow volume with replicas to be migrated
             rep_status = volume.replication_status
-            if(rep_status is not None and rep_status not in
+            if (rep_status is not None and rep_status not in
                     [fields.ReplicationStatus.DISABLED,
                      fields.ReplicationStatus.NOT_CAPABLE]):
                 _retype_error(context, volume, old_reservations,
@@ -3146,7 +3129,7 @@ class VolumeManager(manager.CleanableManager,
 
             try:
                 self.migrate_volume(context, volume, host,
-                                    new_type_id=new_type_id, diff=diff)
+                                    new_type_id=new_type_id)
             except Exception:
                 with excutils.save_and_reraise_exception():
                     _retype_error(context, volume, old_reservations,
@@ -4872,6 +4855,9 @@ class VolumeManager(manager.CleanableManager,
         self.db.volume_attachment_update(ctxt, attachment.id, values)
 
         connection_info['attachment_id'] = attachment.id
+        # Append the enforce_multipath value if the connector has it
+        connection_info['enforce_multipath'] = connector.get(
+            'enforce_multipath', False)
         LOG.debug("Connection info returned from driver %(connection_info)s",
                   {'connection_info':
                    strutils.mask_dict_password(connection_info)})
@@ -5375,7 +5361,8 @@ class VolumeManager(manager.CleanableManager,
 
             volume_utils.copy_image_to_volume(self.driver, context, volume,
                                               image_meta, image_location,
-                                              image_service)
+                                              image_service,
+                                              disable_sparse=True)
 
             self._refresh_volume_glance_meta(context, volume, image_meta)
             volume.status = volume.previous_status

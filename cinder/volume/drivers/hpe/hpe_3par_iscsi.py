@@ -129,10 +129,13 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
         4.0.4 - Added Peer Persistence feature
         4.0.5 - Added Primera array check. bug #1849525
         4.0.6 - Allow iSCSI support for Primera 4.2 onwards
+        4.0.7 - Use vlan iscsi ips. Bug #2015034
+        4.0.8 - Add ipv6 support. Bug #2045411
+        4.0.9 - getWsApiVersion now requires login
 
     """
 
-    VERSION = "4.0.6"
+    VERSION = "4.0.9"
 
     # The name of the CI wiki page.
     CI_WIKI_NAME = "HPE_Storage_CI"
@@ -145,6 +148,7 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
         client_obj = common.client
         is_primera = client_obj.is_primera_array()
         if is_primera:
+            common.client_login()
             api_version = client_obj.getWsApiVersion()
             array_version = api_version['build']
             LOG.debug("array version: %(version)s",
@@ -164,6 +168,13 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
         finally:
             self._logout(common)
 
+    def _update_dicts(self, temp_iscsi_ip, iscsi_ip_list, ip, port):
+        ip_port = temp_iscsi_ip[ip]['ip_port']
+        iscsi_ip_list[ip] = {'ip_port': ip_port,
+                             'nsp': port['nsp'],
+                             'iqn': port['iSCSIName']}
+        del temp_iscsi_ip[ip]
+
     def initialize_iscsi_ports(self, common,
                                remote_target=None, remote_client=None):
         # map iscsi_ip-> ip_port
@@ -181,11 +192,25 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
         if len(backend_conf['hpe3par_iscsi_ips']) > 0:
             # add port values to ip_addr, if necessary
             for ip_addr in backend_conf['hpe3par_iscsi_ips']:
-                ip = ip_addr.split(':')
-                if len(ip) == 1:
-                    temp_iscsi_ip[ip_addr] = {'ip_port': DEFAULT_ISCSI_PORT}
-                elif len(ip) == 2:
-                    temp_iscsi_ip[ip[0]] = {'ip_port': ip[1]}
+                if "." in ip_addr:
+                    # v4
+                    ip = ip_addr.split(':')
+                    if len(ip) == 1:
+                        temp_iscsi_ip[ip_addr] = (
+                            {'ip_port': DEFAULT_ISCSI_PORT})
+                    elif len(ip) == 2:
+                        temp_iscsi_ip[ip[0]] = {'ip_port': ip[1]}
+                elif ":" in ip_addr:
+                    # v6
+                    if "]" in ip_addr:
+                        ip = ip_addr.split(']:')
+                        ip_addr_v6 = ip[0]
+                        ip_addr_v6 = ip_addr_v6.strip('[')
+                        port_v6 = ip[1]
+                        temp_iscsi_ip[ip_addr_v6] = {'ip_port': port_v6}
+                    else:
+                        temp_iscsi_ip[ip_addr] = (
+                            {'ip_port': DEFAULT_ISCSI_PORT})
                 else:
                     LOG.warning("Invalid IP address format '%s'", ip_addr)
 
@@ -202,15 +227,20 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
         # when found, add the valid iSCSI ip, ip port, iqn and nsp
         # to the iSCSI IP dictionary
         iscsi_ports = common.get_active_iscsi_target_ports(remote_client)
+        LOG.debug("iscsi_ports: %(iscsi_ports)s", {'iscsi_ports': iscsi_ports})
 
         for port in iscsi_ports:
             ip = port['IPAddr']
             if ip in temp_iscsi_ip:
-                ip_port = temp_iscsi_ip[ip]['ip_port']
-                iscsi_ip_list[ip] = {'ip_port': ip_port,
-                                     'nsp': port['nsp'],
-                                     'iqn': port['iSCSIName']}
-                del temp_iscsi_ip[ip]
+                self._update_dicts(temp_iscsi_ip, iscsi_ip_list, ip, port)
+
+            if 'iSCSIVlans' in port:
+                for vip in port['iSCSIVlans']:
+                    ip = vip['IPAddr']
+                    if ip in temp_iscsi_ip:
+                        LOG.debug("vlan ip: %(ip)s", {'ip': ip})
+                        self._update_dicts(temp_iscsi_ip, iscsi_ip_list,
+                                           ip, port)
 
         # if the single value iscsi_ip_address option is still in the
         # temp dictionary it's because it defaults to $my_ip which doesn't
@@ -237,6 +267,51 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
             self.iscsi_ips[common._client_conf['hpe3par_api_url']] = (
                 iscsi_ip_list)
 
+    def _vlun_create_or_use_existing(self, volume, common, host, iscsi_ips,
+                                     target_portals, target_iqns,
+                                     target_luns, remote_client,
+                                     target_portal_ips,
+                                     existing_vluns, iscsi_ip,
+                                     lun_id, port):
+        vlun = None
+        # check for an already existing VLUN matching the
+        # nsp for this iSCSI IP. If one is found, use it
+        # instead of creating a new VLUN.
+        for v in existing_vluns:
+            portPos = common.build_portPos(
+                iscsi_ips[iscsi_ip]['nsp'])
+            if v['portPos'] == portPos:
+                vlun = v
+                break
+        else:
+            vlun = common.create_vlun(
+                volume, host, iscsi_ips[iscsi_ip]['nsp'],
+                lun_id=lun_id, remote_client=remote_client)
+
+            # This function is called multiple times (from a for loop).
+            # We want to use the same LUN ID for every port.
+            # For first port, lun_id is received as None.
+            # - assign lun_id = vlun['lun'] and return it.
+            # Thus for subsequent ports, that same lun_id is used
+            # in create_vlun() above.
+            if lun_id is None:
+                lun_id = vlun['lun']
+
+        if ":" in iscsi_ip:
+            # v6
+            iscsi_ip_port = "[%s]:%s" % (
+                iscsi_ip, iscsi_ips[iscsi_ip]['ip_port'])
+        else:
+            # v4
+            iscsi_ip_port = "%s:%s" % (
+                iscsi_ip, iscsi_ips[iscsi_ip]['ip_port'])
+        LOG.debug("iscsi_ip_port: %(var)s", {'var': iscsi_ip_port})
+        target_portals.append(iscsi_ip_port)
+        target_iqns.append(port['iSCSIName'])
+        target_luns.append(vlun['lun'])
+
+        return lun_id
+
     def _initialize_connection_common(self, volume, connector, common,
                                       host, iscsi_ips, ready_ports,
                                       target_portals, target_iqns, target_luns,
@@ -255,30 +330,30 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
         for port in ready_ports:
             iscsi_ip = port['IPAddr']
             if iscsi_ip in target_portal_ips:
-                vlun = None
-                # check for an already existing VLUN matching the
-                # nsp for this iSCSI IP. If one is found, use it
-                # instead of creating a new VLUN.
-                for v in existing_vluns:
-                    portPos = common.build_portPos(
-                        iscsi_ips[iscsi_ip]['nsp'])
-                    if v['portPos'] == portPos:
-                        vlun = v
-                        break
-                else:
-                    vlun = common.create_vlun(
-                        volume, host, iscsi_ips[iscsi_ip]['nsp'],
-                        lun_id=lun_id, remote_client=remote_client)
+                lun_id = (
+                    self._vlun_create_or_use_existing(
+                        volume, common, host, iscsi_ips,
+                        target_portals, target_iqns,
+                        target_luns, remote_client,
+                        target_portal_ips,
+                        existing_vluns, iscsi_ip,
+                        lun_id, port))
 
-                    # We want to use the same LUN ID for every port
-                    if lun_id is None:
-                        lun_id = vlun['lun']
+            if 'iSCSIVlans' in port:
+                for vip in port['iSCSIVlans']:
+                    iscsi_ip = vip['IPAddr']
+                    if iscsi_ip in target_portal_ips:
+                        LOG.debug("vlan ip: %(ip)s", {'ip': iscsi_ip})
 
-                iscsi_ip_port = "%s:%s" % (
-                    iscsi_ip, iscsi_ips[iscsi_ip]['ip_port'])
-                target_portals.append(iscsi_ip_port)
-                target_iqns.append(port['iSCSIName'])
-                target_luns.append(vlun['lun'])
+                        lun_id = (
+                            self._vlun_create_or_use_existing(
+                                volume, common, host, iscsi_ips,
+                                target_portals, target_iqns,
+                                target_luns, remote_client,
+                                target_portal_ips,
+                                existing_vluns, iscsi_ip,
+                                lun_id, port))
+
             else:
                 LOG.warning("iSCSI IP: '%s' was not found in "
                             "hpe3par_iscsi_ips list defined in "
@@ -439,9 +514,17 @@ class HPE3PARISCSIDriver(hpebasedriver.HPE3PARDriverBase):
 
                 iscsi_ip_port = iscsi_ips[iscsi_ip]['ip_port']
                 iscsi_target_iqn = iscsi_ips[iscsi_ip]['iqn']
+                if ":" in iscsi_ip:
+                    # v6
+                    target_portal = "[%s]:%s" % (
+                        iscsi_ip, iscsi_ip_port)
+                else:
+                    # v4
+                    target_portal = "%s:%s" % (
+                        iscsi_ip, iscsi_ip_port)
+                LOG.debug("target_portal: %(var)s", {'var': target_portal})
                 info = {'driver_volume_type': 'iscsi',
-                        'data': {'target_portal': "%s:%s" %
-                                 (iscsi_ip, iscsi_ip_port),
+                        'data': {'target_portal': target_portal,
                                  'target_iqn': iscsi_target_iqn,
                                  'target_lun': vlun['lun'],
                                  'target_discovered': True

@@ -18,8 +18,8 @@ import tempfile
 from unittest import mock
 
 from oslo_utils import units
-import six
 
+from cinder import context
 from cinder import exception
 from cinder import ssh_utils
 from cinder.tests.unit import test
@@ -48,6 +48,7 @@ CONF = """<?xml version='1.0' encoding='UTF-8'?>
 <EternusPool>abcd1234_TPP</EternusPool>
 <EternusPool>abcd1234_RG</EternusPool>
 <EternusSnapPool>abcd1234_OSVD</EternusSnapPool>
+<EternusSnapPool>abcd1234_TPP</EternusSnapPool>
 </FUJITSU>"""
 
 TEST_VOLUME = {
@@ -91,6 +92,16 @@ TEST_CLONE = {
     'host': 'controller@113#abcd1234_TPP'
 }
 
+TEST_VOLUME_QOS = {
+    'id': '7bd8b81f-137d-4140-85ce-d00281c91c84',
+    'name': 'qos',
+    'display_name': 'qos',
+    'provider_location': None,
+    'metadata': {},
+    'size': 1,
+    'host': 'controller@113#abcd1234_TPP'
+}
+
 ISCSI_INITIATOR = 'iqn.1993-08.org.debian:01:8261afe17e4c'
 ISCSI_TARGET_IP = '10.0.0.3'
 ISCSI_TARGET_IQN = 'iqn.2000-09.com.fujitsu:storage-system.eternus-dxl:0'
@@ -98,6 +109,9 @@ FC_TARGET_WWN = ['500000E0DA000001', '500000E0DA000002']
 TEST_WWPN = ['0123456789111111', '0123456789222222']
 TEST_CONNECTOR = {'initiator': ISCSI_INITIATOR, 'wwpns': TEST_WWPN}
 
+STORAGE_IP = '172.16.0.2'
+TEST_USER = 'testuser'
+TEST_PASSWORD = 'testpassword'
 
 STOR_CONF_SVC = 'FUJITSU_StorageConfigurationService'
 CTRL_CONF_SVC = 'FUJITSU_ControllerConfigurationService'
@@ -119,101 +133,128 @@ MAP_STAT = '0'
 VOL_STAT = '0'
 
 FAKE_CAPACITY = 1170368102400
+FAKE_REMAIN = 1168220618752
+FAKE_PROVISION = 1024
 # Volume1 in pool abcd1234_TPP
 FAKE_LUN_ID1 = '600000E00D2A0000002A011500140000'
 FAKE_LUN_NO1 = '0x0014'
 # Snapshot1 in pool abcd1234_OSVD
 FAKE_LUN_ID2 = '600000E00D2A0000002A0115001E0000'
 FAKE_LUN_NO2 = '0x001E'
+FAKE_SDV_NO = '0x001E'
 # Volume2 in pool abcd1234_RG
 FAKE_LUN_ID3 = '600000E00D2800000028075301140000'
 FAKE_LUN_NO3 = '0x0114'
+# VolumeQoS in pool abcd1234_TPP
+FAKE_LUN_ID_QOS = '600000E00D2A0000002A011500140000'
+FAKE_LUN_NO_QOS = '0x0014'
 FAKE_SYSTEM_NAME = 'ET603SA4621302115'
 # abcd1234_TPP pool
-FAKE_USEGB = 2.0
+FAKE_USEGB = 1
 # abcd1234_RG pool
-FAKE_USEGB2 = 1.0
+FAKE_USEGB2 = 2
 FAKE_POOLS = [{
     'path': {'InstanceID': 'FUJITSU:TPP0004'},
     'pool_name': 'abcd1234_TPP',
-    'useable_capacity_gb': (FAKE_CAPACITY / units.Gi) * 20 - FAKE_USEGB,
-    'multiattach': False,
+    'useable_capacity_gb': int(
+        (FAKE_CAPACITY / units.Mi * 20 - FAKE_PROVISION) / 1024),
+    'multiattach': True,
     'thick_provisioning_support': False,
     'provisioned_capacity_gb': FAKE_USEGB,
-    'total_volumes': 2,
     'thin_provisioning_support': True,
-    'free_capacity_gb': FAKE_CAPACITY / units.Gi - FAKE_USEGB,
-    'total_capacity_gb': FAKE_CAPACITY / units.Gi,
+    'free_capacity_gb': int(FAKE_CAPACITY / units.Gi - FAKE_USEGB),
+    'total_capacity_gb': int(FAKE_CAPACITY / units.Gi),
     'max_over_subscription_ratio': '20.0',
 }, {
     'path': {'InstanceID': 'FUJITSU:RSP0005'},
     'pool_name': 'abcd1234_RG',
-    'useable_capacity_gb': FAKE_CAPACITY / units.Gi - FAKE_USEGB2,
-    'multiattach': False,
+    'useable_capacity_gb': int(FAKE_CAPACITY / units.Gi - FAKE_USEGB2),
+    'multiattach': True,
     'thick_provisioning_support': True,
     'provisioned_capacity_gb': FAKE_USEGB2,
-    'total_volumes': 1,
+    'total_volumes': 2,
     'thin_provisioning_support': False,
-    'free_capacity_gb': FAKE_CAPACITY / units.Gi - FAKE_USEGB2,
-    'total_capacity_gb': FAKE_CAPACITY / units.Gi,
+    'free_capacity_gb': int((FAKE_REMAIN * 1.0 / units.Mi) / 1024),
+    'total_capacity_gb': int(FAKE_CAPACITY / units.Gi),
+    'fragment_capacity_mb': FAKE_REMAIN * 1.0 / units.Mi,
     'max_over_subscription_ratio': 1,
 }]
 
 FAKE_STATS = {
-    'driver_version': '1.3.0',
+    'driver_version': '1.4.7',
     'storage_protocol': 'iSCSI',
     'vendor_name': 'FUJITSU',
-    'QoS_support': False,
+    'QoS_support': True,
     'volume_backend_name': 'volume_backend_name',
     'shared_targets': True,
     'backend_state': 'up',
     'pools': FAKE_POOLS,
 }
 FAKE_STATS2 = {
-    'driver_version': '1.3.0',
+    'driver_version': '1.4.7',
     'storage_protocol': 'FC',
     'vendor_name': 'FUJITSU',
-    'QoS_support': False,
+    'QoS_support': True,
     'volume_backend_name': 'volume_backend_name',
     'shared_targets': True,
     'backend_state': 'up',
     'pools': FAKE_POOLS,
 }
 
-
 # Volume1 in pool abcd1234_TPP
 FAKE_KEYBIND1 = {
-    'CreationClassName': 'FUJITSU_StorageVolume',
     'SystemName': STORAGE_SYSTEM,
     'DeviceID': FAKE_LUN_ID1,
-    'SystemCreationClassName': 'FUJITSU_StorageComputerSystem',
 }
 
 # Volume2 in pool abcd1234_RG
 FAKE_KEYBIND3 = {
-    'CreationClassName': 'FUJITSU_StorageVolume',
     'SystemName': STORAGE_SYSTEM,
     'DeviceID': FAKE_LUN_ID3,
-    'SystemCreationClassName': 'FUJITSU_StorageComputerSystem',
+}
+
+# Volume QOS in pool abcd1234_TPP
+FAKE_KEYBIND_QOS = {
+    'SystemName': STORAGE_SYSTEM,
+    'DeviceID': FAKE_LUN_ID_QOS,
 }
 
 # Volume1
 FAKE_LOCATION1 = {
     'classname': 'FUJITSU_StorageVolume',
     'keybindings': FAKE_KEYBIND1,
+    'vol_name': 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+}
+
+# Clone Volume
+FAKE_CLONE_LOCATION = {
+    'classname': 'FUJITSU_StorageVolume',
+    'keybindings': FAKE_KEYBIND1,
+    'vol_name': 'FJosv_UkCZqMFZW3SU_JzxjHiKfg=='
 }
 
 # Volume2
 FAKE_LOCATION3 = {
     'classname': 'FUJITSU_StorageVolume',
     'keybindings': FAKE_KEYBIND3,
+    'vol_name': 'FJosv_4whcadwDac7ANKHA2O719A=='
+}
+
+# VolumeQOS
+FAKE_LOCATION_QOS = {
+    'classname': 'FUJITSU_StorageVolume',
+    'keybindings': FAKE_KEYBIND_QOS,
+    'vol_name': 'FJosv_mIsapeuZOaSXz4LYTqFcug=='
 }
 
 # Volume1 metadata info.
+# Here is a misspelling, and the right value should be "Thinprovisioning_POOL".
+# It would not be compatible with the metadata of the legacy volumes,
+# so this spelling mistake needs to be retained.
 FAKE_LUN_META1 = {
     'FJ_Pool_Type': 'Thinporvisioning_POOL',
     'FJ_Volume_No': FAKE_LUN_NO1,
-    'FJ_Volume_Name': u'FJosv_0qJ4rpOHgFE8ipcJOMfBmg==',
+    'FJ_Volume_Name': 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg==',
     'FJ_Pool_Name': STORAGE_TYPE,
     'FJ_Backend': FAKE_SYSTEM_NAME,
 }
@@ -222,49 +263,105 @@ FAKE_LUN_META1 = {
 FAKE_LUN_META3 = {
     'FJ_Pool_Type': 'RAID_GROUP',
     'FJ_Volume_No': FAKE_LUN_NO3,
-    'FJ_Volume_Name': u'FJosv_4whcadwDac7ANKHA2O719A==',
+    'FJ_Volume_Name': 'FJosv_4whcadwDac7ANKHA2O719A==',
     'FJ_Pool_Name': STORAGE_TYPE2,
     'FJ_Backend': FAKE_SYSTEM_NAME,
 }
+
+# VolumeQOS metadata info
+FAKE_LUN_META_QOS = {
+    'FJ_Pool_Type': 'Thinporvisioning_POOL',
+    'FJ_Volume_No': FAKE_LUN_NO_QOS,
+    'FJ_Volume_Name': 'FJosv_mIsapeuZOaSXz4LYTqFcug==',
+    'FJ_Pool_Name': STORAGE_TYPE,
+    'FJ_Backend': FAKE_SYSTEM_NAME,
+}
+
 # Volume1
 FAKE_MODEL_INFO1 = {
-    'provider_location': six.text_type(FAKE_LOCATION1),
+    'provider_location': str(FAKE_LOCATION1),
     'metadata': FAKE_LUN_META1,
 }
 # Volume2
 FAKE_MODEL_INFO3 = {
-    'provider_location': six.text_type(FAKE_LOCATION3),
+    'provider_location': str(FAKE_LOCATION3),
     'metadata': FAKE_LUN_META3,
+}
+# VoluemQOS
+FAKE_MODEL_INFO_QOS = {
+    'provider_location': str(FAKE_LOCATION_QOS),
+    'metadata': FAKE_LUN_META_QOS,
 }
 
 FAKE_KEYBIND2 = {
-    'CreationClassName': 'FUJITSU_StorageVolume',
     'SystemName': STORAGE_SYSTEM,
     'DeviceID': FAKE_LUN_ID2,
-    'SystemCreationClassName': 'FUJITSU_StorageComputerSystem',
 }
 
 FAKE_LOCATION2 = {
     'classname': 'FUJITSU_StorageVolume',
     'keybindings': FAKE_KEYBIND2,
+    'vol_name': 'FJosv_OgEZj1mSvKRvIKOExKktlg=='
+}
+
+FAKE_SNAP_META = {
+    'FJ_Pool_Name': 'abcd1234_OSVD',
+    'FJ_SDV_Name': u'FJosv_OgEZj1mSvKRvIKOExKktlg==',
+    'FJ_SDV_No': FAKE_SDV_NO,
+    'FJ_Pool_Type': 2
+}
+
+# Snapshot created on controller@113#abcd1234_TPP
+FAKE_SNAP_META2 = {
+    'FJ_Pool_Name': 'abcd1234_TPP',
+    'FJ_SDV_Name': 'FJosv_OgEZj1mSvKRvIKOExKktlg==',
+    'FJ_SDV_No': FAKE_SDV_NO,
+    'FJ_Pool_Type': 5
 }
 
 FAKE_SNAP_INFO = {
-    'provider_location': six.text_type(FAKE_LOCATION2)
+    'metadata': FAKE_SNAP_META,
+    'provider_location': str(FAKE_LOCATION2)
+}
+
+# Snapshot created on controller@113#abcd1234_TPP
+FAKE_SNAP_INFO2 = {
+    'metadata': FAKE_SNAP_META2,
+    'provider_location': str(FAKE_LOCATION2)
 }
 
 FAKE_LUN_META2 = {
     'FJ_Pool_Type': 'Thinporvisioning_POOL',
     'FJ_Volume_No': FAKE_LUN_NO1,
-    'FJ_Volume_Name': u'FJosv_UkCZqMFZW3SU_JzxjHiKfg==',
+    'FJ_Volume_Name': 'FJosv_OgEZj1mSvKRvIKOExKktlg==',
+    'FJ_Pool_Name': STORAGE_TYPE,
+    'FJ_Backend': FAKE_SYSTEM_NAME,
+}
+
+FAKE_CLONE_LUN_META = {
+    'FJ_Pool_Type': 'Thinporvisioning_POOL',
+    'FJ_Volume_No': FAKE_LUN_NO1,
+    'FJ_Volume_Name': 'FJosv_UkCZqMFZW3SU_JzxjHiKfg==',
     'FJ_Pool_Name': STORAGE_TYPE,
     'FJ_Backend': FAKE_SYSTEM_NAME,
 }
 
 FAKE_MODEL_INFO2 = {
-    'provider_location': six.text_type(FAKE_LOCATION1),
-    'metadata': FAKE_LUN_META2,
+    'provider_location': str(FAKE_CLONE_LOCATION),
+    'metadata': FAKE_CLONE_LUN_META,
 }
+
+FAKE_CLI_OUTPUT = {
+    "result": 0,
+    'rc': '0',
+    "message": 'TEST_MESSAGE'
+}
+
+# Constants for QOS
+MAX_IOPS = 4294967295
+MAX_THROUGHPUT = 2097151
+MIN_IOPS = 1
+MIN_THROUGHPUT = 1
 
 
 class FJ_StorageVolume(dict):
@@ -289,6 +386,35 @@ class FakeCIMInstanceName(dict):
         instancename.namespace = 'root/eternus'
         return instancename
 
+    def fake_enumerateinstances(self):
+        instancename_1 = FakeCIMInstanceName()
+
+        ret = []
+        instancename_1['ElementName'] = 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+        instancename_1['Purpose'] = '00228+0x06'
+        instancename_1['Name'] = None
+        instancename_1['DeviceID'] = FAKE_LUN_ID1
+        instancename_1['SystemName'] = STORAGE_SYSTEM
+        ret.append(instancename_1)
+        instancename_1.path = ''
+        instancename_1.classname = 'FUJITSU_StorageVolume'
+
+        snaps = FakeCIMInstanceName()
+        snaps['ElementName'] = 'FJosv_OgEZj1mSvKRvIKOExKktlg=='
+        snaps['Name'] = None
+        snaps['DeviceID'] = FAKE_LUN_ID2
+        snaps['SystemName'] = STORAGE_SYSTEM
+        ret.append(snaps)
+        snaps.path = ''
+        snaps.classname = 'FUJITSU_StorageVolume'
+
+        map = FakeCIMInstanceName()
+        map['ElementName'] = 'FJosv_hhJsV9lcMBvAPADrGqucwg=='
+        map['Name'] = None
+        ret.append(map)
+        map.path = ''
+        return ret
+
 
 class FakeEternusConnection(object):
     def InvokeMethod(self, MethodName, Service, ElementName=None, InPool=None,
@@ -299,7 +425,7 @@ class FakeEternusConnection(object):
                      SourceElement=None, TargetElement=None,
                      Operation=None, CopyType=None,
                      Synchronization=None, ProtocolControllers=None,
-                     TargetPool=None):
+                     TargetPool=None, WaitForCopyState=None):
         global MAP_STAT, VOL_STAT
         if MethodName == 'CreateOrModifyElementFromStoragePool':
             VOL_STAT = '1'
@@ -308,7 +434,10 @@ class FakeEternusConnection(object):
             if InPool.get('InstanceID') == 'FUJITSU:RSP0005':
                 job = {'TheElement': vol[1].path}
             else:
-                job = {'TheElement': vol[0].path}
+                if ElementName == 'FJosv_OgEZj1mSvKRvIKOExKktlg==':
+                    job = {'TheElement': vol[3].path}
+                else:
+                    job = {'TheElement': vol[0].path}
         elif MethodName == 'ReturnToStoragePool':
             VOL_STAT = '0'
             rc = 0
@@ -383,6 +512,9 @@ class FakeEternusConnection(object):
             result = self._enum_scsiport_endpoint()
         elif name == 'FUJITSU_StorageHardwareID':
             result = None
+        elif name == 'FUJITSU_StorageVolume':
+            instancename_1 = FakeCIMInstanceName()
+            result = instancename_1.fake_enumerateinstances()
         else:
             result = None
 
@@ -498,6 +630,35 @@ class FakeEternusConnection(object):
 
     def _ref_storage_sync(self):
         syncnames = []
+
+        cpsessions = {}
+
+        synced = FakeCIMInstanceName()
+        synced_keybindings = {}
+        synced_keybindings['CreationClassName'] = STOR_VOL
+        synced_keybindings['DeviceID'] = FAKE_LUN_ID2
+        synced_keybindings['SystemCreationClassName'] = \
+            'FUJITSU_StorageComputerSystem'
+        synced_keybindings['SystemName'] = STORAGE_SYSTEM
+        synced['ClassName'] = STOR_VOL
+        synced.keybindings = synced_keybindings
+        cpsessions['SyncedElement'] = synced
+
+        system = FakeCIMInstanceName()
+        system_keybindings = {}
+        system_keybindings['CreationClassName'] = STOR_VOL
+        system_keybindings['DeviceID'] = FAKE_LUN_ID1
+        system_keybindings['SystemCreationClassName'] = \
+            'FUJITSU_StorageComputerSystem'
+        system_keybindings['SystemName'] = STORAGE_SYSTEM
+        system['ClassName'] = STOR_VOL
+        system.keybindings = system_keybindings
+        cpsessions['SystemElement'] = system
+
+        cpsessions['classname'] = STOR_SYNC
+
+        syncnames.append(cpsessions)
+
         return syncnames
 
     def _default_ref(self, objectpath):
@@ -654,8 +815,8 @@ class FakeEternusConnection(object):
             pool['InstanceID'] = 'FUJITSU:RSP0004'
             pool['CreationClassName'] = 'FUJITSU_RAIDStoragePool'
             pool['ElementName'] = 'abcd1234_OSVD'
-            pool['TotalManagedSpace'] = 1170368102400
-            pool['RemainingManagedSpace'] = 1170368102400 - 1 * units.Gi
+            pool['TotalManagedSpace'] = FAKE_CAPACITY
+            pool['RemainingManagedSpace'] = FAKE_CAPACITY - 1 * units.Gi
             pool.path = FJ_StoragePool()
             pool.path['InstanceID'] = 'FUJITSU:RSP0004'
             pool.path.classname = 'FUJITSU_RAIDStoragePool'
@@ -664,8 +825,8 @@ class FakeEternusConnection(object):
             pool2['InstanceID'] = 'FUJITSU:RSP0005'
             pool2['CreationClassName'] = 'FUJITSU_RAIDStoragePool'
             pool2['ElementName'] = 'abcd1234_RG'
-            pool2['TotalManagedSpace'] = 1170368102400
-            pool2['RemainingManagedSpace'] = 1170368102400 - 1 * units.Gi
+            pool2['TotalManagedSpace'] = FAKE_CAPACITY
+            pool2['RemainingManagedSpace'] = FAKE_CAPACITY - 2 * units.Gi
             pool2.path = FJ_StoragePool()
             pool2.path['InstanceID'] = 'FUJITSU:RSP0005'
             pool2.path.classname = 'FUJITSU_RAIDStoragePool'
@@ -674,8 +835,8 @@ class FakeEternusConnection(object):
             pool['InstanceID'] = 'FUJITSU:TPP0004'
             pool['CreationClassName'] = 'FUJITSU_ThinProvisioningPool'
             pool['ElementName'] = 'abcd1234_TPP'
-            pool['TotalManagedSpace'] = 1170368102400
-            pool['RemainingManagedSpace'] = 1170368102400 - 2 * units.Gi
+            pool['TotalManagedSpace'] = FAKE_CAPACITY
+            pool['RemainingManagedSpace'] = FAKE_CAPACITY - 1 * units.Gi
             pool.path = FJ_StoragePool()
             pool.path['InstanceID'] = 'FUJITSU:TPP0004'
             pool.path.classname = 'FUJITSU_ThinProvisioningPool'
@@ -710,6 +871,7 @@ class FakeEternusConnection(object):
             },
         }
         volume['provider_location'] = str(name)
+        volume.path.keybindings = name['keybindings']
         volumes.append(volume)
 
         volume3 = FJ_StorageVolume()
@@ -735,6 +897,7 @@ class FakeEternusConnection(object):
             },
         }
         volume3['provider_location'] = str(name3)
+        volume3.path.keybindings = name3['keybindings']
         volumes.append(volume3)
 
         snap_vol = FJ_StorageVolume()
@@ -759,7 +922,32 @@ class FakeEternusConnection(object):
             },
         }
         snap_vol['provider_location'] = str(name2)
+        snap_vol.path.keybindings = name2['keybindings']
         volumes.append(snap_vol)
+
+        snap_vol2 = FJ_StorageVolume()
+        snap_vol2['name'] = TEST_SNAP['name']
+        snap_vol2['poolpath'] = 'FUJITSU:TPP0004'
+        snap_vol2['CreationClassName'] = 'FUJITSU_StorageVolume'
+        snap_vol2['Name'] = FAKE_LUN_ID2
+        snap_vol2['DeviceID'] = FAKE_LUN_ID2
+        snap_vol2['SystemCreationClassName'] = 'FUJITSU_StorageComputerSystem'
+        snap_vol2['SystemName'] = STORAGE_SYSTEM
+        snap_vol2['ElementName'] = 'FJosv_OgEZj1mSvKRvIKOExKktlg=='
+        snap_vol2.path = snap_vol
+        snap_vol2.path.classname = snap_vol['CreationClassName']
+
+        name4 = {
+            'classname': 'FUJITSU_StorageVolume',
+            'keybindings': {
+                'CreationClassName': 'FUJITSU_StorageVolume',
+                'SystemName': STORAGE_SYSTEM,
+                'DeviceID': snap_vol['DeviceID'],
+                'SystemCreationClassName': 'FUJITSU_StorageComputerSystem',
+            },
+        }
+        snap_vol2['provider_location'] = str(name4)
+        volumes.append(snap_vol2)
 
         clone_vol = FJ_StorageVolume()
         clone_vol['name'] = TEST_CLONE['name']
@@ -771,6 +959,18 @@ class FakeEternusConnection(object):
         clone_vol['SystemCreationClassName'] = 'FUJITSU_StorageComputerSystem'
         clone_vol.path = clone_vol
         clone_vol.path.classname = clone_vol['CreationClassName']
+
+        name_clone = {
+            'classname': 'FUJITSU_StorageVolume',
+            'keybindings': {
+                'CreationClassName': 'FUJITSU_StorageVolume',
+                'SystemName': STORAGE_SYSTEM,
+                'DeviceID': clone_vol['DeviceID'],
+                'SystemCreationClassName': 'FUJITSU_StorageComputerSystem',
+            },
+        }
+        clone_vol['provider_location'] = str(name_clone)
+        clone_vol.path.keybindings = name_clone['keybindings']
         volumes.append(clone_vol)
 
         return volumes
@@ -883,6 +1083,7 @@ class FJFCDriverTestCase(test.TestCase):
         self.configuration.cinder_eternus_config_file = self.config_file.name
         self.configuration.safe_get = self.fake_safe_get
         self.configuration.max_over_subscription_ratio = '20.0'
+        self.configuration.fujitsu_use_cli_copy = False
 
         self.mock_object(dx_common.FJDXCommon, '_get_eternus_connection',
                          self.fake_eternus_connection)
@@ -892,19 +1093,28 @@ class FJFCDriverTestCase(test.TestCase):
                          instancename.fake_create_eternus_instance_name)
 
         self.mock_object(ssh_utils, 'SSHPool', mock.Mock())
+
+        self.mock_object(dx_common.FJDXCommon, '_get_qos_specs',
+                         return_value={})
+
         self.mock_object(eternus_dx_cli.FJDXCLI, '_exec_cli_with_eternus',
                          self.fake_exec_cli_with_eternus)
         # Set fc driver to self.driver.
         driver = dx_fc.FJDXFCDriver(configuration=self.configuration)
         self.driver = driver
 
+        self.context = context.get_admin_context()
+
     def fake_exec_cli_with_eternus(self, exec_cmdline):
         if exec_cmdline == "show users":
-            ret = ('\r\nCLI> show users\r\n00\r\n'
+            ret = ('\r\nCLI> %s\r\n00\r\n'
                    '3B\r\nf.ce\tMaintainer\t01\t00'
                    '\t00\t00\r\ntestuser\tSoftware'
-                   '\t01\t01\t00\t00\r\nCLI> ')
-            return ret
+                   '\t01\t01\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('expand volume'):
+            ret = '%s\r\n00\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('set volume-qos'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
         elif exec_cmdline.startswith('show volumes'):
             ret = ('\r\nCLI> %s\r\n00\r\n0560\r\n0000'
                    '\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
@@ -914,14 +1124,77 @@ class FJFCDriverTestCase(test.TestCase):
                    '\tFF\t20\tFF\tFFFF\t00'
                    '\t600000E00D2A0000002A011500140000'
                    '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
-                   '\t00\tFF\r\n0001\tFJosv_UkCZqMFZW3SU_JzxjHiKfg=='
-                   '\tA001\t0B\t00\t0000\tabcd1234_OSVD'
-                   '\t0000000000200000\t00\t00\t00000000'
-                   '\t0050\tFF\t00\tFF\tFF\t20\tFF\tFFFF'
-                   '\t00\t600000E00D2A0000002A0115001E0000'
-                   '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
                    '\t00\tFF' % exec_cmdline)
-            return ret
+        elif exec_cmdline.startswith('show enclosure-status'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   'ETDX200S3_1\t01\tET203ACU\t4601417434\t280753\t20'
+                   '\t00\t00\t01\t02\t01001000\tV10L87-9000\t91\r\n02'
+                   '\r\n70000000\t30\r\nD0000100\t30\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show volume-qos'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   '0002\t\r\n0000\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg==\t0F'
+                   '\t\r\n0001\tFJosv_OgEZj1mSvKRvIKOExKktlg==\t0D'
+                   '\t\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show copy-sessions'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0001\t\r\n'
+                   '0001\tFFFF\t01\t08\tFF\tFF\t03\t02\tFF\tFF\t05ABD7D2\t'
+                   '########################################\t'
+                   '########################################\t'
+                   '00000281\t00000286\t0001\t00\tFF\t0000000000000800\t'
+                   '0000000000000000\t0000000000000100\t0000000000000800\t'
+                   '04\t00\t00000000\t2020101009341400\t01\t10\tFFFF\tFFFF\t'
+                   '0000000000000000\tFFFFFFFFFFFFFFFF\tFFFFFFFFFFFFFFFF\tFF\t'
+                   'FF\t64\t00\t07\t00\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show qos-bandwidth-limit'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0010\t\r\n00\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff\r\n'
+                   '01\t00000001\t00000001\t00000001\t00000001\t00000001'
+                   '\t00000001\t00000001\t00000001\t00000001\t00000001'
+                   '\t00000001\t00000001\r\n02\t00000002\t00000002\t00000002'
+                   '\t00000002\t00000002\t00000002\t00000002\t00000002'
+                   '\t00000002\t00000002\t00000002\t00000002\r\n03\t00000003'
+                   '\t00000003\t00000003\t00000003\t00000003\t00000003'
+                   '\t00000003\t00000003\t00000003\t00000003\t00000003'
+                   '\t00000003\r\n04\t00000004\t00000004\t00000004\t00000004'
+                   '\t00000004\t00000004\t00000004\t00000004\t00000004'
+                   '\t00000004\t00000004\t00000004\r\n05\t00000005\t00000005'
+                   '\t00000005\t00000005\t00000005\t00000005\t00000005'
+                   '\t00000005\t00000005\t00000005\t00000005\t00000005\r\n06'
+                   '\t00000006\t00000006\t00000006\t00000006\t00000006'
+                   '\t00000006\t00000006\t00000006\t00000006\t00000006'
+                   '\t00000006\t00000006\r\n07\t00000007\t00000007\t00000007'
+                   '\t00000007\t00000007\t00000007\t00000007\t00000007'
+                   '\t00000007\t00000007\t00000007\t00000007\r\n08\t00000008'
+                   '\t00000008\t00000008\t00000008\t00000008\t00000008'
+                   '\t00000008\t00000008\t00000008\t00000008\t00000008'
+                   '\t00000008\r\n09\t00000009\t00000009\t00000009\t00000009'
+                   '\t00000009\t00000009\t00000009\t00000009\t00000009'
+                   '\t00000009\t00000009\t00000009\r\n0a\t0000000a\t0000000a'
+                   '\t0000000a\t0000000a\t0000000a\t0000000a\t0000000a'
+                   '\t0000000a\t0000000a\t0000000a\t0000000a\t0000000a\r\n0b'
+                   '\t0000000b\t0000000b\t0000000b\t0000000b\t0000000b'
+                   '\t0000000b\t0000000b\t0000000b\t0000000b\t0000000b'
+                   '\t0000000b\t0000000b\r\n0c\t0000000c\t0000000c\t0000000c'
+                   '\t0000000c\t0000000c\t0000000c\t0000000c\t0000000c'
+                   '\t0000000c\t0000000c\t0000000c\t0000000c\r\n0d\t0000000d'
+                   '\t0000000d\t0000000d\t0000000d\t0000000d\t0000000d'
+                   '\t0000000d\t0000000d\t0000000d\t0000000d\t0000000d'
+                   '\t0000000d\r\n0e\t0000000e\t0000000e\t0000000e\t0000000e'
+                   '\t0000000e\t0000000e\t0000000e\t0000000e\t0000000e'
+                   '\t0000000e\t0000000e\t0000000e\r\n0f\t0000000f\t0000000f'
+                   '\t0000000f\t0000000f\t0000000f\t0000000f\t0000000f'
+                   '\t0000000f\t0000000f\t0000000f\t0000000f\t0000000f'
+                   '\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('set qos-bandwidth-limit'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('stop copy-session'):
+            ret = '%s\r\n00\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('start copy-snap-opc'):
+            ret = '%s\r\n00\r\n0019\r\nCLI> ' % exec_cmdline
+        else:
+            ret = None
+        return ret
 
     def fake_safe_get(self, str=None):
         return str
@@ -930,6 +1203,10 @@ class FJFCDriverTestCase(test.TestCase):
         conn = FakeEternusConnection()
         return conn
 
+    def volume_update(self, volume, diction):
+        for key, value in diction.items():
+            volume[key] = value
+
     def test_get_volume_stats(self):
         ret = self.driver.get_volume_stats(True)
 
@@ -937,9 +1214,11 @@ class FJFCDriverTestCase(test.TestCase):
 
     def test_create_and_delete_volume(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         model_info = self.driver.create_volume(TEST_VOLUME2)
+        self.volume_update(TEST_VOLUME2, model_info)
         self.assertEqual(FAKE_MODEL_INFO3, model_info)
 
         self.driver.delete_volume(TEST_VOLUME)
@@ -962,6 +1241,7 @@ class FJFCDriverTestCase(test.TestCase):
                      'data': fake_mapdata}
 
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         info = self.driver.initialize_connection(TEST_VOLUME,
@@ -980,25 +1260,49 @@ class FJFCDriverTestCase(test.TestCase):
 
         self.driver.delete_volume(TEST_VOLUME)
 
-    def test_create_and_delete_snapshot(self):
+    def test_create_and_delete_snapshot_using_smis(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
         self.assertEqual(FAKE_SNAP_INFO, snap_info)
+
+        self.driver.delete_snapshot(TEST_SNAP)
+        self.driver.delete_volume(TEST_VOLUME)
+
+    @mock.patch.object(dx_common, 'LOG')
+    def test_create_and_delete_snapshot_using_cli(self, mock_log):
+        self.configuration.fujitsu_use_cli_copy = True
+        driver = dx_fc.FJDXFCDriver(configuration=self.configuration)
+        self.driver = driver
+
+        model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO1, model_info)
+
+        warning_msg = '_create_snapshot, Can not create SDV by SMI-S.'
+        snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
+        self.assertEqual(FAKE_SNAP_INFO2, snap_info)
+        mock_log.warning.assert_called_with(warning_msg)
 
         self.driver.delete_snapshot(TEST_SNAP)
         self.driver.delete_volume(TEST_VOLUME)
 
     def test_create_volume_from_snapshot(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
         self.assertEqual(FAKE_SNAP_INFO, snap_info)
 
         model_info = self.driver.create_volume_from_snapshot(TEST_CLONE,
                                                              TEST_SNAP)
+        self.volume_update(TEST_CLONE, model_info)
         self.assertEqual(FAKE_MODEL_INFO2, model_info)
 
         self.driver.delete_snapshot(TEST_SNAP)
@@ -1007,28 +1311,73 @@ class FJFCDriverTestCase(test.TestCase):
 
     def test_create_cloned_volume(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         model_info = self.driver.create_cloned_volume(TEST_CLONE, TEST_VOLUME)
+        self.volume_update(TEST_CLONE, model_info)
         self.assertEqual(FAKE_MODEL_INFO2, model_info)
 
         self.driver.delete_volume(TEST_CLONE)
         self.driver.delete_volume(TEST_VOLUME)
 
     def test_extend_volume(self):
+        # Test the extension of volume created on RaidGroup and
+        # ThinProvisioningPool separately.
+        TEST_VOLUME_LIST = [TEST_VOLUME, TEST_VOLUME2]
+        FAKE_MODEL_INFO_LIST = [FAKE_MODEL_INFO1, FAKE_MODEL_INFO3]
+        for i in range(len(TEST_VOLUME_LIST)):
+            model_info = self.driver.create_volume(TEST_VOLUME_LIST[i])
+            self.volume_update(TEST_VOLUME_LIST[i], model_info)
+            self.assertEqual(FAKE_MODEL_INFO_LIST[i], model_info)
+
+            self.driver.extend_volume(TEST_VOLUME_LIST[i], 10)
+
+    def test_create_volume_with_qos(self):
+        self.driver.common._get_qos_specs = mock.Mock()
+        self.driver.common._get_qos_specs.return_value = {'maxBWS': '700'}
+        self.driver.common._set_qos = mock.Mock()
+        model_info = self.driver.create_volume(TEST_VOLUME_QOS)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO_QOS, model_info)
+        self.driver.common._set_qos.assert_called()
+
+    def test_update_migrated_volume(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
-        volume_info = {}
-        for key in TEST_VOLUME:
-            if key == 'provider_location':
-                volume_info[key] = model_info[key]
-            elif key == 'metadata':
-                volume_info[key] = model_info[key]
-            else:
-                volume_info[key] = TEST_VOLUME[key]
+        model_info2 = self.driver.create_volume(TEST_VOLUME2)
+        self.volume_update(TEST_VOLUME2, model_info2)
+        self.assertEqual(FAKE_MODEL_INFO3, model_info2)
 
-        self.driver.extend_volume(volume_info, 10)
+        model_update = self.driver.update_migrated_volume(self.context,
+                                                          TEST_VOLUME,
+                                                          TEST_VOLUME2,
+                                                          'available')
+
+        FAKE_MIGRATED_MODEL_UPDATE = {
+            '_name_id': TEST_VOLUME2['id'],
+            'provider_location': model_info2['provider_location']
+        }
+        self.assertEqual(FAKE_MIGRATED_MODEL_UPDATE, model_update)
+
+    def test_revert_to_snapshot(self):
+        self.driver.common.revert_to_snapshot = mock.Mock()
+        model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO1, model_info)
+
+        snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
+        self.assertEqual(FAKE_SNAP_INFO, snap_info)
+
+        self.driver.revert_to_snapshot(self.context,
+                                       TEST_VOLUME,
+                                       TEST_SNAP)
+
+        self.driver.common.revert_to_snapshot.assert_called_with(TEST_VOLUME,
+                                                                 TEST_SNAP)
 
 
 class FJISCSIDriverTestCase(test.TestCase):
@@ -1049,6 +1398,7 @@ class FJISCSIDriverTestCase(test.TestCase):
         self.configuration.cinder_eternus_config_file = self.config_file.name
         self.configuration.safe_get = self.fake_safe_get
         self.configuration.max_over_subscription_ratio = '20.0'
+        self.configuration.fujitsu_use_cli_copy = False
 
         self.mock_object(dx_common.FJDXCommon, '_get_eternus_connection',
                          self.fake_eternus_connection)
@@ -1061,19 +1411,28 @@ class FJISCSIDriverTestCase(test.TestCase):
                          self.fake_get_mapdata)
 
         self.mock_object(ssh_utils, 'SSHPool', mock.Mock())
+
+        self.mock_object(dx_common.FJDXCommon, '_get_qos_specs',
+                         return_value={})
+
         self.mock_object(eternus_dx_cli.FJDXCLI, '_exec_cli_with_eternus',
                          self.fake_exec_cli_with_eternus)
         # Set iscsi driver to self.driver.
         driver = dx_iscsi.FJDXISCSIDriver(configuration=self.configuration)
         self.driver = driver
 
+        self.context = context.get_admin_context()
+
     def fake_exec_cli_with_eternus(self, exec_cmdline):
         if exec_cmdline == "show users":
-            ret = ('\r\nCLI> show users\r\n00\r\n'
+            ret = ('\r\nCLI> %s\r\n00\r\n'
                    '3B\r\nf.ce\tMaintainer\t01\t00'
                    '\t00\t00\r\ntestuser\tSoftware'
-                   '\t01\t01\t00\t00\r\nCLI> ')
-            return ret
+                   '\t01\t01\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('expand volume'):
+            ret = '%s\r\n00\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('set volume-qos'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
         elif exec_cmdline.startswith('show volumes'):
             ret = ('\r\nCLI> %s\r\n00\r\n0560\r\n0000'
                    '\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
@@ -1083,14 +1442,75 @@ class FJISCSIDriverTestCase(test.TestCase):
                    '\tFF\t20\tFF\tFFFF\t00'
                    '\t600000E00D2A0000002A011500140000'
                    '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
-                   '\t00\tFF\r\n0001\tFJosv_UkCZqMFZW3SU_JzxjHiKfg=='
-                   '\tA001\t0B\t00\t0000\tabcd1234_OSVD'
-                   '\t0000000000200000\t00\t00\t00000000'
-                   '\t0050\tFF\t00\tFF\tFF\t20\tFF\tFFFF'
-                   '\t00\t600000E00D2A0000002A0115001E0000'
-                   '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
                    '\t00\tFF' % exec_cmdline)
-            return ret
+        elif exec_cmdline.startswith('show enclosure-status'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   'ETDX200S3_1\t01\tET203ACU\t4601417434\t280753\t20'
+                   '\t00\t00\t01\t02\t01001000\tV10L87-9000\t91\r\n02'
+                   '\r\n70000000\t30\r\nD0000100\t30\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show volume-qos'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   '0002\t\r\n0000\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg==\t0F'
+                   '\t\r\n0001\tFJosv_OgEZj1mSvKRvIKOExKktlg==\t0D'
+                   '\t\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show copy-sessions'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0001\t\r\n'
+                   '0001\tFFFF\t01\t08\tFF\tFF\t03\t02\tFF\tFF\t05ABD7D2\t'
+                   '########################################\t'
+                   '########################################\t'
+                   '00000281\t00000286\t0001\t00\tFF\t0000000000000800\t'
+                   '0000000000000000\t0000000000000100\t0000000000000800\t'
+                   '04\t00\t00000000\t2020101009341400\t01\t10\tFFFF\tFFFF\t'
+                   '0000000000000000\tFFFFFFFFFFFFFFFF\tFFFFFFFFFFFFFFFF\tFF\t'
+                   'FF\t64\t00\t07\t00\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show qos-bandwidth-limit'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0010\t\r\n00\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff\r\n'
+                   '01\t00000001\t00000001\t00000001\t00000001\t00000001'
+                   '\t00000001\t00000001\t00000001\t00000001\t00000001'
+                   '\t00000001\t00000001\r\n02\t00000002\t00000002\t00000002'
+                   '\t00000002\t00000002\t00000002\t00000002\t00000002'
+                   '\t00000002\t00000002\t00000002\t00000002\r\n03\t00000003'
+                   '\t00000003\t00000003\t00000003\t00000003\t00000003'
+                   '\t00000003\t00000003\t00000003\t00000003\t00000003'
+                   '\t00000003\r\n04\t00000004\t00000004\t00000004\t00000004'
+                   '\t00000004\t00000004\t00000004\t00000004\t00000004'
+                   '\t00000004\t00000004\t00000004\r\n05\t00000005\t00000005'
+                   '\t00000005\t00000005\t00000005\t00000005\t00000005'
+                   '\t00000005\t00000005\t00000005\t00000005\t00000005\r\n06'
+                   '\t00000006\t00000006\t00000006\t00000006\t00000006'
+                   '\t00000006\t00000006\t00000006\t00000006\t00000006'
+                   '\t00000006\t00000006\r\n07\t00000007\t00000007\t00000007'
+                   '\t00000007\t00000007\t00000007\t00000007\t00000007'
+                   '\t00000007\t00000007\t00000007\t00000007\r\n08\t00000008'
+                   '\t00000008\t00000008\t00000008\t00000008\t00000008'
+                   '\t00000008\t00000008\t00000008\t00000008\t00000008'
+                   '\t00000008\r\n09\t00000009\t00000009\t00000009\t00000009'
+                   '\t00000009\t00000009\t00000009\t00000009\t00000009'
+                   '\t00000009\t00000009\t00000009\r\n0a\t0000000a\t0000000a'
+                   '\t0000000a\t0000000a\t0000000a\t0000000a\t0000000a'
+                   '\t0000000a\t0000000a\t0000000a\t0000000a\t0000000a\r\n0b'
+                   '\t0000000b\t0000000b\t0000000b\t0000000b\t0000000b'
+                   '\t0000000b\t0000000b\t0000000b\t0000000b\t0000000b'
+                   '\t0000000b\t0000000b\r\n0c\t0000000c\t0000000c\t0000000c'
+                   '\t0000000c\t0000000c\t0000000c\t0000000c\t0000000c'
+                   '\t0000000c\t0000000c\t0000000c\t0000000c\r\n0d\t0000000d'
+                   '\t0000000d\t0000000d\t0000000d\t0000000d\t0000000d'
+                   '\t0000000d\t0000000d\t0000000d\t0000000d\t0000000d'
+                   '\t0000000d\r\n0e\t0000000e\t0000000e\t0000000e\t0000000e'
+                   '\t0000000e\t0000000e\t0000000e\t0000000e\t0000000e'
+                   '\t0000000e\t0000000e\t0000000e\r\n0f\t0000000f\t0000000f'
+                   '\t0000000f\t0000000f\t0000000f\t0000000f\t0000000f'
+                   '\t0000000f\t0000000f\t0000000f\t0000000f\t0000000f'
+                   '\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('set qos-bandwidth-limit'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('start copy-snap-opc'):
+            ret = '%s\r\n00\r\n0019\r\nCLI> ' % exec_cmdline
+        else:
+            ret = None
+        return ret
 
     def fake_safe_get(self, str=None):
         return str
@@ -1110,6 +1530,10 @@ class FJISCSIDriverTestCase(test.TestCase):
                     'target_iqns': ISCSI_TARGET_IQN,
                     'target_lun': 0}
 
+    def volume_update(self, volume, diction):
+        for key, value in diction.items():
+            volume[key] = value
+
     def test_get_volume_stats(self):
         ret = self.driver.get_volume_stats(True)
 
@@ -1117,9 +1541,11 @@ class FJISCSIDriverTestCase(test.TestCase):
 
     def test_create_and_delete_volume(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         model_info = self.driver.create_volume(TEST_VOLUME2)
+        self.volume_update(TEST_VOLUME2, model_info)
         self.assertEqual(FAKE_MODEL_INFO3, model_info)
 
         self.driver.delete_volume(TEST_VOLUME)
@@ -1133,6 +1559,7 @@ class FJISCSIDriverTestCase(test.TestCase):
                      'data': fake_mapdata}
 
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         info = self.driver.initialize_connection(TEST_VOLUME,
@@ -1150,25 +1577,49 @@ class FJISCSIDriverTestCase(test.TestCase):
                                          None)
         self.driver.delete_volume(TEST_VOLUME)
 
-    def test_create_and_delete_snapshot(self):
+    def test_create_and_delete_snapshot_using_smis(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
         self.assertEqual(FAKE_SNAP_INFO, snap_info)
+
+        self.driver.delete_snapshot(TEST_SNAP)
+        self.driver.delete_volume(TEST_VOLUME)
+
+    @mock.patch.object(dx_common, 'LOG')
+    def test_create_and_delete_snapshot_using_cli(self, mock_log):
+        self.configuration.fujitsu_use_cli_copy = True
+        driver = dx_fc.FJDXFCDriver(configuration=self.configuration)
+        self.driver = driver
+
+        model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO1, model_info)
+
+        warning_msg = '_create_snapshot, Can not create SDV by SMI-S.'
+        snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
+        self.assertEqual(FAKE_SNAP_INFO2, snap_info)
+        mock_log.warning.assert_called_with(warning_msg)
 
         self.driver.delete_snapshot(TEST_SNAP)
         self.driver.delete_volume(TEST_VOLUME)
 
     def test_create_volume_from_snapshot(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
         self.assertEqual(FAKE_SNAP_INFO, snap_info)
 
         model_info = self.driver.create_volume_from_snapshot(TEST_CLONE,
                                                              TEST_SNAP)
+        self.volume_update(TEST_CLONE, model_info)
         self.assertEqual(FAKE_MODEL_INFO2, model_info)
 
         self.driver.delete_snapshot(TEST_SNAP)
@@ -1177,25 +1628,609 @@ class FJISCSIDriverTestCase(test.TestCase):
 
     def test_create_cloned_volume(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
         model_info = self.driver.create_cloned_volume(TEST_CLONE, TEST_VOLUME)
+        self.volume_update(TEST_CLONE, model_info)
         self.assertEqual(FAKE_MODEL_INFO2, model_info)
 
         self.driver.delete_volume(TEST_CLONE)
         self.driver.delete_volume(TEST_VOLUME)
 
     def test_extend_volume(self):
+        # Test the extension of volume created on RaidGroup and
+        # ThinProvisioningPool separately.
+        TEST_VOLUME_LIST = [TEST_VOLUME, TEST_VOLUME2]
+        FAKE_MODEL_INFO_LIST = [FAKE_MODEL_INFO1, FAKE_MODEL_INFO3]
+        for i in range(len(TEST_VOLUME_LIST)):
+            model_info = self.driver.create_volume(TEST_VOLUME_LIST[i])
+            self.volume_update(TEST_VOLUME_LIST[i], model_info)
+            self.assertEqual(FAKE_MODEL_INFO_LIST[i], model_info)
+
+            self.driver.extend_volume(TEST_VOLUME_LIST[i], 10)
+
+    def test_create_volume_with_qos(self):
+        self.driver.common._get_qos_specs = mock.Mock()
+        self.driver.common._get_qos_specs.return_value = {'maxBWS': '700'}
+        self.driver.common._set_qos = mock.Mock()
+        model_info = self.driver.create_volume(TEST_VOLUME_QOS)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO_QOS, model_info)
+        self.driver.common._set_qos.assert_called()
+
+    def test_update_migrated_volume(self):
         model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
         self.assertEqual(FAKE_MODEL_INFO1, model_info)
 
-        volume_info = {}
-        for key in TEST_VOLUME:
-            if key == 'provider_location':
-                volume_info[key] = model_info[key]
-            elif key == 'metadata':
-                volume_info[key] = model_info[key]
-            else:
-                volume_info[key] = TEST_VOLUME[key]
+        model_info2 = self.driver.create_volume(TEST_VOLUME2)
+        self.volume_update(TEST_VOLUME2, model_info2)
+        self.assertEqual(FAKE_MODEL_INFO3, model_info2)
 
-        self.driver.extend_volume(volume_info, 10)
+        model_update = self.driver.update_migrated_volume(self.context,
+                                                          TEST_VOLUME,
+                                                          TEST_VOLUME2,
+                                                          'available')
+
+        FAKE_MIGRATED_MODEL_UPDATE = {
+            '_name_id': TEST_VOLUME2['id'],
+            'provider_location': model_info2['provider_location']
+        }
+        self.assertEqual(FAKE_MIGRATED_MODEL_UPDATE, model_update)
+
+    def test_revert_to_snapshot(self):
+        self.driver.common.revert_to_snapshot = mock.Mock()
+        model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO1, model_info)
+
+        snap_info = self.driver.create_snapshot(TEST_SNAP)
+        self.volume_update(TEST_SNAP, snap_info)
+        self.assertEqual(FAKE_SNAP_INFO, snap_info)
+
+        self.driver.revert_to_snapshot(self.context,
+                                       TEST_VOLUME,
+                                       TEST_SNAP)
+
+        self.driver.common.revert_to_snapshot.assert_called_with(TEST_VOLUME,
+                                                                 TEST_SNAP)
+
+
+class FJCLITestCase(test.TestCase):
+    def __init__(self, *args, **kwargs):
+        super(FJCLITestCase, self).__init__(*args, **kwargs)
+
+    def setUp(self):
+        super(FJCLITestCase, self).setUp()
+        self.mock_object(ssh_utils, 'SSHPool', mock.Mock())
+        self.mock_object(eternus_dx_cli.FJDXCLI, '_exec_cli_with_eternus',
+                         self.fake_exec_cli_with_eternus)
+
+        cli = eternus_dx_cli.FJDXCLI(user=TEST_USER,
+                                     storage_ip=STORAGE_IP,
+                                     password=TEST_PASSWORD)
+        self.cli = cli
+
+    def create_fake_options(self, **kwargs):
+        # Create options for CLI command.
+        FAKE_OPTION_DICT = {}
+        for key, value in kwargs.items():
+            processed_key = key.replace('_', '-')
+            FAKE_OPTION_DICT[processed_key] = value
+        FAKE_OPTION = {**FAKE_OPTION_DICT}
+        return FAKE_OPTION
+
+    def fake_exec_cli_with_eternus(self, exec_cmdline):
+        if exec_cmdline == "show users":
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   '3B\r\nf.ce\tMaintainer\t01\t00'
+                   '\t00\t00\r\ntestuser\tSoftware'
+                   '\t01\t01\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('expand volume'):
+            ret = '%s\r\n00\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('set volume-qos'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('show volumes'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0560\r\n0000'
+                   '\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+                   '\tA001\t0B\t00\t0000\tabcd1234_TPP'
+                   '\t0000000000200000\t00\t00'
+                   '\t00000000\t0050\tFF\t00\tFF'
+                   '\tFF\t20\tFF\tFFFF\t00'
+                   '\t600000E00D2A0000002A011500140000'
+                   '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
+                   '\t00\tFF\r\n0001\tFJosv_OgEZj1mSvKRvIKOExKktlg=='
+                   '\tA001\t0B\t00\t0000\tabcd1234_OSVD'
+                   '\t0000000000200000\t00\t00\t00000000'
+                   '\t0050\tFF\t00\tFF\tFF\t20\tFF\tFFFF'
+                   '\t00\t600000E00D2A0000002A0115001E0000'
+                   '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
+                   '\t00\tFF' % exec_cmdline)
+        elif exec_cmdline.startswith('show enclosure-status'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   'ETDX200S3_1\t01\tET203ACU\t4601417434\t280753\t20'
+                   '\t00\t00\t01\t02\t01001000\tV10L87-9000\t91\r\n02'
+                   '\r\n70000000\t30\r\nD0000100\t30\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show volume-qos'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   '0001\r\n0000\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg==\t01\t00\t00'
+                   '\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show copy-sessions'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0001\t\r\n'
+                   '0001\tFFFF\t01\t08\tFF\tFF\t03\t02\tFF\tFF\t05ABD7D2\t'
+                   '########################################\t'
+                   '########################################\t'
+                   '00000281\t00000286\t0001\t00\tFF\t0000000000000800\t'
+                   '0000000000000000\t0000000000000100\t0000000000000800\t'
+                   '04\t00\t00000000\t2020101009341400\t01\t10\tFFFF\tFFFF\t'
+                   '0000000000000000\tFFFFFFFFFFFFFFFF\tFFFFFFFFFFFFFFFF\tFF\t'
+                   'FF\t64\t00\t07\t00\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show qos-bandwidth-limit'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0001\t\r\n00\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff\r\n'
+                   'CLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('set qos-bandwidth-limit'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('stop copy-session'):
+            ret = '%s\r\n00\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('delete volume'):
+            ret = '%s\r\n00\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('start copy-snap-opc'):
+            ret = '%s\r\n00\r\n0019\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('start copy-opc'):
+            ret = '%s\r\n00\r\n0019\r\nCLI> ' % exec_cmdline
+        else:
+            ret = None
+        return ret
+
+    @mock.patch.object(eternus_dx_cli.FJDXCLI, '_exec_cli_with_eternus')
+    def test_create_error_message(self, mock_exec_cli_with_eternus):
+        expected_error_value = {'message': ['-bandwidth-limit', 'asdf'],
+                                'rc': 'E8101',
+                                'result': 0}
+
+        FAKE_VOLUME_NAME = 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+        FAKE_BANDWIDTH_LIMIT = 'abcd'
+        FAKE_QOS_OPTION = self.create_fake_options(
+            volume_name=FAKE_VOLUME_NAME,
+            bandwidth_limit=FAKE_BANDWIDTH_LIMIT)
+
+        error_cli_output = ('\r\nCLI> set volume-qos -volume-name %s '
+                            '-bandwidth-limit %s\r\n'
+                            '01\r\n8101\r\n-bandwidth-limit\r\nasdf\r\n'
+                            'CLI> ' % (FAKE_VOLUME_NAME, FAKE_BANDWIDTH_LIMIT))
+        mock_exec_cli_with_eternus.return_value = error_cli_output
+
+        error_qos_output = self.cli._set_volume_qos(**FAKE_QOS_OPTION)
+
+        self.assertEqual(expected_error_value, error_qos_output)
+
+    def test_get_options(self):
+        expected_option = " -bandwidth-limit 2"
+        option = {"bandwidth-limit": 2}
+        ret = self.cli._get_option(**option)
+        self.assertEqual(expected_option, ret)
+
+    def test_done_and_default_func(self):
+        # Test function 'done' and '_default_func' in CLI file.
+        self.cli.CMD_dic['check_user_role'] = mock.Mock()
+        self.cli._default_func = mock.Mock(
+            side_effect=Exception('Invalid function is specified'))
+
+        cmd1 = 'check_user_role'
+        self.cli.done(cmd1)
+        self.cli.CMD_dic['check_user_role'].assert_called_with()
+
+        cmd2 = 'test_run_cmd'
+        cli_ex = None
+        try:
+            self.cli.done(cmd2)
+        except Exception as ex:
+            cli_ex = ex
+        finally:
+            self.cli._default_func.assert_called()
+            self.assertEqual(str(cli_ex), "Invalid function is specified")
+
+    def test_check_user_role(self):
+        FAKE_ROLE = {**FAKE_CLI_OUTPUT, 'message': 'Software'}
+
+        role = self.cli._check_user_role()
+        self.assertEqual(FAKE_ROLE, role)
+
+    def test_expand_volume(self):
+        FAKE_VOLME_NAME = 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+        FAKE_RG_NAME = 'abcd1234_RG'
+        FAKE_SIZE = '10gb'
+        FAKE_EXPAND_OPTION = self.create_fake_options(
+            volume_name=FAKE_VOLME_NAME,
+            rg_name=FAKE_RG_NAME,
+            size=FAKE_SIZE)
+
+        EXPAND_OUTPUT = self.cli._expand_volume(**FAKE_EXPAND_OPTION)
+        FAKE_EXPAND_OUTPUT = {**FAKE_CLI_OUTPUT, 'message': []}
+        self.assertEqual(FAKE_EXPAND_OUTPUT, EXPAND_OUTPUT)
+
+    def test_set_volume_qos(self):
+        FAKE_VOLUME_NAME = 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+        FAKE_BANDWIDTH_LIMIT = 2
+        FAKE_QOS_OPTION = self.create_fake_options(
+            volume_name=FAKE_VOLUME_NAME,
+            bandwidth_limit=FAKE_BANDWIDTH_LIMIT)
+
+        FAKE_VOLUME_NUMBER = ['0001']
+        FAKE_QOS_OUTPUT = {**FAKE_CLI_OUTPUT, 'message': FAKE_VOLUME_NUMBER}
+
+        volume_number = self.cli._set_volume_qos(**FAKE_QOS_OPTION)
+        self.assertEqual(FAKE_QOS_OUTPUT, volume_number)
+
+    def test_show_copy_sessions(self):
+        FAKE_COPY_SESSION = [{
+            'Source Num': 641,
+            'Dest Num': 646,
+            'Type': 'Snap',
+            'Status': 'Active',
+            'Phase': 'Tracking',
+            'Session ID': 1,
+        }]
+        FAKE_COPY_SESSION_OUTPUT = {**FAKE_CLI_OUTPUT,
+                                    'message': FAKE_COPY_SESSION}
+
+        cpdatalist = self.cli._show_copy_sessions()
+        self.assertEqual(FAKE_COPY_SESSION_OUTPUT, cpdatalist)
+
+    def test_show_pool_provision(self):
+        FAKE_POOL_PROVIOSN_OPTION = self.create_fake_options(
+            pool_name='abcd1234_TPP')
+
+        FAKE_PROVISION = {**FAKE_CLI_OUTPUT, 'message': 2048.0}
+
+        proviosn = self.cli._show_pool_provision(**FAKE_POOL_PROVIOSN_OPTION)
+        self.assertEqual(FAKE_PROVISION, proviosn)
+
+    def test_show_qos_bandwidth_limit(self):
+        FAKE_QOS_BANDWIDTH_LIMIT = {'read_bytes_sec': 65535,
+                                    'read_iops_sec': 65535,
+                                    'read_limit': 0,
+                                    'total_bytes_sec': 65535,
+                                    'total_iops_sec': 65535,
+                                    'total_limit': 0,
+                                    'write_bytes_sec': 65535,
+                                    'write_iops_sec': 65535,
+                                    'write_limit': 0}
+        FAKE_QOS_LIST = {**FAKE_CLI_OUTPUT,
+                         'message': [FAKE_QOS_BANDWIDTH_LIMIT]}
+
+        qos_list = self.cli._show_qos_bandwidth_limit()
+        self.assertEqual(FAKE_QOS_LIST, qos_list)
+
+    def test_set_qos_bandwidth_limit(self):
+        FAKE_VOLUME_NAME = 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+        FAKE_READ_BANDWIDTH_LIMIT = 2
+        FAKE_WRITE_BANDWIDTH_LIMIT = 3
+        FAKE_QOS_OPTION = self.create_fake_options(
+            volume_name=FAKE_VOLUME_NAME,
+            read_bandwidth_limit=FAKE_READ_BANDWIDTH_LIMIT,
+            write_bandwidth_limit=FAKE_WRITE_BANDWIDTH_LIMIT)
+
+        FAKE_VOLUME_NUMBER = ['0001']
+        FAKE_QOS_OUTPUT = {**FAKE_CLI_OUTPUT, 'message': FAKE_VOLUME_NUMBER}
+
+        volume_number = self.cli._set_qos_bandwidth_limit(**FAKE_QOS_OPTION)
+        self.assertEqual(FAKE_QOS_OUTPUT, volume_number)
+
+    def test_show_volume_qos(self):
+        FAKE_VOLUME_QOS = {'total_limit': 1,
+                           'read_limit': 0,
+                           'write_limit': 0}
+        FAKE_VQOS_DATA_LIST = {**FAKE_CLI_OUTPUT,
+                               'message': [FAKE_VOLUME_QOS]}
+
+        vqos_datalist = self.cli._show_volume_qos()
+        self.assertEqual(FAKE_VQOS_DATA_LIST, vqos_datalist)
+
+    def test_show_enclosure_status(self):
+        FAKE_VERSION = 'V10L87-9000'
+        FAKE_VERSION_INFO = {**FAKE_CLI_OUTPUT,
+                             'message': {'version': FAKE_VERSION}}
+
+        versioninfo = self.cli._show_enclosure_status()
+        self.assertEqual(FAKE_VERSION_INFO, versioninfo)
+
+    def test_start_copy_snap_opc(self):
+        FAKE_SNAP_OPC_OPTION = self.create_fake_options(
+            mode='normal',
+            source_volume_number=31,
+            destination_volume_number=39,
+            source_lba=0,
+            destination=0,
+            size=1
+        )
+
+        FAKE_OPC_ID = '0019'
+        FAKE_OPC_INFO = {**FAKE_CLI_OUTPUT,
+                         'message': [FAKE_OPC_ID]}
+
+        opc_id = self.cli._start_copy_snap_opc(**FAKE_SNAP_OPC_OPTION)
+        self.assertEqual(FAKE_OPC_INFO, opc_id)
+
+    def test_stop_copy_session(self):
+        FAKE_SESSION_ID = '0001'
+        FAKE_STOP_OUTPUT = {**FAKE_CLI_OUTPUT, 'message': []}
+        FAKE_STOP_COPY_SESSION_OPTION = self.create_fake_options(
+            session_id=FAKE_SESSION_ID)
+        stop_output = self.cli._stop_copy_session(
+            **FAKE_STOP_COPY_SESSION_OPTION)
+        self.assertEqual(FAKE_STOP_OUTPUT, stop_output)
+
+    def test_start_copy_opc(self):
+        FAKE_SNAP_OPC_OPTION = self.create_fake_options(
+            source_volume_number=31,
+            destination_volume_number=39,
+        )
+
+        FAKE_OPC_ID = '0019'
+        FAKE_OPC_INFO = {**FAKE_CLI_OUTPUT,
+                         'message': [FAKE_OPC_ID]}
+
+        opc_id = self.cli._start_copy_opc(**FAKE_SNAP_OPC_OPTION)
+        self.assertEqual(FAKE_OPC_INFO, opc_id)
+
+    def test_delete_volume(self):
+        FAKE_VOLUME_NAME = 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+        FAKE_DELETE_OUTPUT = {**FAKE_CLI_OUTPUT, 'message': []}
+        FAKE_DELETE_VOLUME_OPTION = self.create_fake_options(
+            volume_name=FAKE_VOLUME_NAME)
+
+        delete_output = self.cli._delete_volume(**FAKE_DELETE_VOLUME_OPTION)
+        self.assertEqual(FAKE_DELETE_OUTPUT, delete_output)
+
+
+class FJCommonTestCase(test.TestCase):
+    def __init__(self, *args, **kwargs):
+        super(FJCommonTestCase, self).__init__(*args, **kwargs)
+
+    def setUp(self):
+        super(FJCommonTestCase, self).setUp()
+
+        # Make fake xml-configuration file.
+        self.config_file = tempfile.NamedTemporaryFile("w+", suffix='.xml')
+        self.addCleanup(self.config_file.close)
+        self.config_file.write(CONF)
+        self.config_file.flush()
+
+        # Make fake Object by using mock as configuration object.
+        self.configuration = mock.Mock(spec=conf.Configuration)
+        self.configuration.cinder_eternus_config_file = self.config_file.name
+        self.configuration.safe_get = self.fake_safe_get
+        self.configuration.max_over_subscription_ratio = '20.0'
+        self.configuration.fujitsu_use_cli_copy = False
+
+        self.mock_object(dx_common.FJDXCommon, '_get_eternus_connection',
+                         self.fake_eternus_connection)
+
+        instancename = FakeCIMInstanceName()
+        self.mock_object(dx_common.FJDXCommon, '_create_eternus_instance_name',
+                         instancename.fake_create_eternus_instance_name)
+
+        self.mock_object(ssh_utils, 'SSHPool', mock.Mock())
+
+        self.mock_object(dx_common.FJDXCommon, '_get_qos_specs',
+                         return_value={})
+
+        self.mock_object(eternus_dx_cli.FJDXCLI, '_exec_cli_with_eternus',
+                         self.fake_exec_cli_with_eternus)
+        # Set iscsi driver to self.driver.
+        driver = dx_iscsi.FJDXISCSIDriver(configuration=self.configuration)
+        self.driver = driver
+
+        self.context = context.get_admin_context()
+
+    def fake_exec_cli_with_eternus(self, exec_cmdline):
+        if exec_cmdline == "show users":
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   '3B\r\nf.ce\tMaintainer\t01\t00'
+                   '\t00\t00\r\ntestuser\tSoftware'
+                   '\t01\t01\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('set volume-qos'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('show volumes'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0560\r\n0000'
+                   '\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+                   '\tA001\t0B\t00\t0000\tabcd1234_TPP'
+                   '\t0000000000200000\t00\t00'
+                   '\t00000000\t0050\tFF\t00\tFF'
+                   '\tFF\t20\tFF\tFFFF\t00'
+                   '\t600000E00D2A0000002A011500140000'
+                   '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
+                   '\t00\tFF\r\n0001\tFJosv_OgEZj1mSvKRvIKOExKktlg=='
+                   '\tA001\t0B\t00\t0000\tabcd1234_OSVD'
+                   '\t0000000000200000\t00\t00\t00000000'
+                   '\t0050\tFF\t00\tFF\tFF\t20\tFF\tFFFF'
+                   '\t00\t600000E00D2A0000002A0115001E0000'
+                   '\t00\t00\tFF\tFF\tFFFFFFFF\t00'
+                   '\t00\tFF' % exec_cmdline)
+        elif exec_cmdline.startswith('show enclosure-status'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   'ETDX200S3_1\t01\tET203ACU\t4601417434\t280753\t20'
+                   '\t00\t00\t01\t02\t01001000\tV10L87-9000\t91\r\n02'
+                   '\r\n70000000\t30\r\nD0000100\t30\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show volume-qos'):
+            ret = ('\r\nCLI> %s\r\n00\r\n'
+                   '0001\r\n0000\tFJosv_0qJ4rpOHgFE8ipcJOMfBmg==\t01\t00\t00'
+                   '\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show copy-sessions'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0001\t\r\n'
+                   '0001\tFFFF\t01\t08\tFF\tFF\t03\t02\tFF\tFF\t05ABD7D2\t'
+                   '########################################\t'
+                   '########################################\t'
+                   '00000281\t00000286\t0001\t00\tFF\t0000000000000800\t'
+                   '0000000000000000\t0000000000000100\t0000000000000800\t'
+                   '04\t00\t00000000\t2020101009341400\t01\t10\tFFFF\tFFFF\t'
+                   '0000000000000000\tFFFFFFFFFFFFFFFF\tFFFFFFFFFFFFFFFF\tFF\t'
+                   'FF\t64\t00\t07\t00\t00\t00\r\nCLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('show qos-bandwidth-limit'):
+            ret = ('\r\nCLI> %s\r\n00\r\n0001\t\r\n00\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff'
+                   '\t0000ffff\t0000ffff\t0000ffff\t0000ffff\t0000ffff\r\n'
+                   'CLI> ' % exec_cmdline)
+        elif exec_cmdline.startswith('set qos-bandwidth-limit'):
+            ret = '%s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
+        elif exec_cmdline.startswith('stop copy-session'):
+            ret = '%s\r\n00\r\nCLI> ' % exec_cmdline
+        else:
+            ret = None
+        return ret
+
+    def fake_safe_get(self, str=None):
+        return str
+
+    def fake_eternus_connection(self):
+        conn = FakeEternusConnection()
+        return conn
+
+    def test_get_volume_number(self):
+        vol_instance = FakeCIMInstanceName()
+        vol_instance['ElementName'] = 'FJosv_0qJ4rpOHgFE8ipcJOMfBmg=='
+        vol_instance['Purpose'] = '00228+0x06'
+        vol_instance['Name'] = None
+        vol_instance['DeviceID'] = FAKE_LUN_ID1
+        vol_instance['SystemName'] = STORAGE_SYSTEM
+        vol_instance.path = ''
+        vol_instance.classname = 'FUJITSU_StorageVolume'
+
+        volume_no = self.driver.common._get_volume_number(vol_instance)
+        self.assertEqual(FAKE_LUN_NO1, volume_no)
+
+    def volume_update(self, volume, diction):
+        for key, value in diction.items():
+            volume[key] = value
+
+    def test_get_eternus_model(self):
+        ETERNUS_MODEL = self.driver.common._get_eternus_model()
+        self.assertEqual(3, ETERNUS_MODEL)
+
+    def test_get_matadata(self):
+        model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO1, model_info)
+
+        TEST_METADATA = self.driver.common.get_metadata(TEST_VOLUME)
+        self.assertEqual(FAKE_LUN_META1, TEST_METADATA)
+
+    def test_is_qos_or_format_support(self):
+        QOS_SUPPORT = \
+            self.driver.common._is_qos_or_format_support('QOS setting')
+        self.assertTrue(QOS_SUPPORT)
+
+    def test_get_qos_category_by_value(self):
+        FAKE_QOS_KEY = 'maxBWS'
+        FAKE_QOS_VALUE = 700
+        FAKE_QOS_DICT = {'bandwidth-limit': 2}
+        QOS_Category_Dict = self.driver.common._get_qos_category_by_value(
+            FAKE_QOS_KEY, FAKE_QOS_VALUE)
+        self.assertEqual(FAKE_QOS_DICT, QOS_Category_Dict)
+
+    def test_get_param(self):
+        FAKE_QOS_SPEC_DICT = {'total_bytes_sec': 2137152,
+                              'read_bytes_sec': 1068576,
+                              'unspport_key': 1234}
+        EXPECTED_KEY_DICT = {'read_bytes_sec': int(FAKE_QOS_SPEC_DICT
+                                                   ['read_bytes_sec'] /
+                                                   units.Mi),
+                             'read_iops_sec': MAX_IOPS,
+                             'total_bytes_sec': int(FAKE_QOS_SPEC_DICT
+                                                    ['total_bytes_sec'] /
+                                                    units.Mi),
+                             'total_iops_sec': MAX_IOPS}
+        KEY_DICT = self.driver.common._get_param(FAKE_QOS_SPEC_DICT)
+        self.assertEqual(EXPECTED_KEY_DICT, KEY_DICT)
+
+    def test_check_iops(self):
+        FAKE_QOS_KEY = 'total_iops_sec'
+        FAKE_QOS_VALUE = 2137152
+        QOS_VALUE = self.driver.common._check_iops(FAKE_QOS_KEY,
+                                                   FAKE_QOS_VALUE)
+        self.assertEqual(FAKE_QOS_VALUE, QOS_VALUE)
+
+    def test_check_throughput(self):
+        FAKE_QOS_KEY = 'total_bytes_sec'
+        FAKE_QOS_VALUE = 2137152
+        QOS_VALUE = self.driver.common._check_throughput(FAKE_QOS_KEY,
+                                                         FAKE_QOS_VALUE)
+        self.assertEqual(int(FAKE_QOS_VALUE / units.Mi),
+                         QOS_VALUE)
+
+    def test_get_qos_category(self):
+        FAKE_QOS_SPEC_DICT = {'total_bytes_sec': 2137152,
+                              'read_bytes_sec': 1068576}
+        FAKE_KEY_DICT = {'read_bytes_sec': int(FAKE_QOS_SPEC_DICT
+                                               ['read_bytes_sec'] /
+                                               units.Mi),
+                         'read_iops_sec': MAX_IOPS,
+                         'total_bytes_sec': int(FAKE_QOS_SPEC_DICT
+                                                ['total_bytes_sec'] /
+                                                units.Mi),
+                         'total_iops_sec': MAX_IOPS}
+        FAKE_RET_DICT = {'bandwidth-limit': FAKE_KEY_DICT['total_bytes_sec'],
+                         'read-bandwidth-limit':
+                             FAKE_KEY_DICT['read_bytes_sec'],
+                         'write-bandwidth-limit': 0}
+        RET_DICT = self.driver.common._get_qos_category(FAKE_KEY_DICT)
+        self.assertEqual(FAKE_RET_DICT, RET_DICT)
+
+    @mock.patch.object(eternus_dx_cli.FJDXCLI, '_exec_cli_with_eternus')
+    def test_set_limit(self, mock_exec_cli_with_eternus):
+        exec_cmdline = 'set qos-bandwidth-limit -mode volume-qos ' \
+                       '-bandwidth-limit 5 -iops 10000 -throughput 450'
+        mock_exec_cli_with_eternus.return_value = \
+            '\r\nCLI> %s\r\n00\r\n0001\r\nCLI> ' % exec_cmdline
+        FAKE_MODE = 'volume-qos'
+        FAKE_LIMIT = 5
+        FAKE_IOPS = 10000
+        FAKE_THROUGHOUTPUT = 450
+        self.driver.common._set_limit(FAKE_MODE, FAKE_LIMIT,
+                                      FAKE_IOPS, FAKE_THROUGHOUTPUT)
+        mock_exec_cli_with_eternus.assert_called_with(exec_cmdline)
+
+    def test_get_copy_sessions_list(self):
+        FAKE_COPY_SESSION = [{
+            'Source Num': 641,
+            'Dest Num': 646,
+            'Type': 'Snap',
+            'Status': 'Active',
+            'Phase': 'Tracking',
+            'Session ID': 1,
+        }]
+        copy_session_list = self.driver.common._get_copy_sessions_list()
+        self.assertEqual(FAKE_COPY_SESSION, copy_session_list)
+
+    def test_update_migrated_volume(self):
+        model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO1, model_info)
+
+        model_info2 = self.driver.create_volume(TEST_VOLUME2)
+        self.volume_update(TEST_VOLUME2, model_info2)
+        self.assertEqual(FAKE_MODEL_INFO3, model_info2)
+
+        model_update = self.driver.common.update_migrated_volume(self.context,
+                                                                 TEST_VOLUME,
+                                                                 TEST_VOLUME2)
+
+        FAKE_MIGRATED_MODEL_UPDATE = {
+            '_name_id': TEST_VOLUME2['id'],
+            'provider_location': model_info2['provider_location']
+        }
+        self.assertEqual(FAKE_MIGRATED_MODEL_UPDATE, model_update)
+
+    def test_create_snapshot(self):
+        model_info = self.driver.create_volume(TEST_VOLUME)
+        self.volume_update(TEST_VOLUME, model_info)
+        self.assertEqual(FAKE_MODEL_INFO1, model_info)
+
+        snap_info = self.driver.common._create_snapshot(TEST_SNAP)
+        self.assertEqual(FAKE_SNAP_INFO, snap_info)
+
+        self.driver.delete_volume(TEST_VOLUME)

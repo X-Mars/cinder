@@ -27,7 +27,6 @@ from ddt import unpack
 from oslo_service import loopingcall
 from oslo_utils import timeutils
 from oslo_utils import units
-import six
 
 from cinder import context
 from cinder import exception
@@ -590,9 +589,9 @@ class SolidFireVolumeTestCase(test.TestCase):
                                   '_get_sfaccounts_for_tenant',
                                   return_value=[{'accountID': 5,
                                                  'username':
-                                                 'prefix-testprjid'}]),\
+                                                 'prefix-testprjid'}]), \
                 mock.patch.object(sfv, '_retrieve_replication_settings',
-                                  return_value=["Async", {}]),\
+                                  return_value=["Async", {}]), \
                 mock.patch.object(sfv, '_get_sf_volume',
                                   return_value={'volumeID': 33}):
             sfv.create_snapshot(testsnap)
@@ -965,7 +964,7 @@ class SolidFireVolumeTestCase(test.TestCase):
                               '_remove_volume_from_vags') as rem_vol:
 
             sfv.delete_volume(testvol)
-            rem_vol.not_called(get_vol_result['volumeID'])
+            rem_vol.assert_not_called()
 
     def test_delete_multiattach_volume(self):
         vol_id = 'a720b3c0-d1f0-11e1-9b23-0800200c9a66'
@@ -2370,7 +2369,7 @@ class SolidFireVolumeTestCase(test.TestCase):
                        {'name': prefix + 'three'}]
         with mock.patch.object(sfv,
                                '_get_all_active_volumes',
-                               return_value=active_vols),\
+                               return_value=active_vols), \
             mock.patch.object(sfv,
                               '_sf_create_group_snapshot',
                               return_value=None) as create:
@@ -2440,7 +2439,7 @@ class SolidFireVolumeTestCase(test.TestCase):
         fake_gsnap = {'groupSnapshotID': 42}
         with mock.patch.object(sfv,
                                '_get_group_snapshot_by_name',
-                               return_value=fake_gsnap),\
+                               return_value=fake_gsnap), \
             mock.patch.object(sfv,
                               '_delete_group_snapshot') as del_stuff:
             sfv._delete_cgsnapshot_by_name('does not matter')
@@ -2481,9 +2480,9 @@ class SolidFireVolumeTestCase(test.TestCase):
         kek = (None, None, {})
         with mock.patch.object(sfv,
                                '_get_group_snapshot_by_name',
-                               return_value=group_snap) as get_snap,\
+                               return_value=group_snap) as get_snap, \
             mock.patch.object(sfv,
-                              '_find_linked_snapshot'),\
+                              '_find_linked_snapshot'), \
             mock.patch.object(sfv,
                               '_do_clone_volume',
                               return_value=kek):
@@ -2511,16 +2510,16 @@ class SolidFireVolumeTestCase(test.TestCase):
         kek = (None, None, {})
         with mock.patch.object(sfv,
                                '_create_temp_group_snapshot',
-                               return_value=source_cg['id']),\
+                               return_value=source_cg['id']), \
             mock.patch.object(sfv,
                               '_get_group_snapshot_by_name',
-                              return_value=group_snap) as get_snap,\
+                              return_value=group_snap) as get_snap, \
             mock.patch.object(sfv,
                               '_find_linked_snapshot',
-                              return_value=source_snap),\
+                              return_value=source_snap), \
             mock.patch.object(sfv,
                               '_do_clone_volume',
-                              return_value=kek),\
+                              return_value=kek), \
             mock.patch.object(sfv,
                               '_delete_cgsnapshot_by_name'):
             model, vol_models = sfv._create_consistencygroup_from_src(
@@ -2543,7 +2542,7 @@ class SolidFireVolumeTestCase(test.TestCase):
                        {'name': pfx + 'two'}]
         with mock.patch.object(sfv,
                                '_get_all_active_volumes',
-                               return_value=active_vols),\
+                               return_value=active_vols), \
             mock.patch.object(sfv,
                               '_sf_create_group_snapshot') as create_gsnap:
             sfv._create_cgsnapshot(ctxt, cgsnapshot, snapshots)
@@ -2560,7 +2559,7 @@ class SolidFireVolumeTestCase(test.TestCase):
         active_vols = [{'name': pfx + 'one'}]
         with mock.patch.object(sfv,
                                '_get_all_active_volumes',
-                               return_value=active_vols),\
+                               return_value=active_vols), \
             mock.patch.object(sfv,
                               '_sf_create_group_snapshot'):
             self.assertRaises(solidfire.SolidFireDriverException,
@@ -2580,7 +2579,7 @@ class SolidFireVolumeTestCase(test.TestCase):
                 source.get('group_snapshot_id'))
         with mock.patch.object(sfv,
                                '_get_group_snapshot_by_name',
-                               return_value={}) as get,\
+                               return_value={}) as get, \
             mock.patch.object(sfv,
                               '_create_clone_from_sf_snapshot',
                               return_value='model'):
@@ -2788,10 +2787,10 @@ class SolidFireVolumeTestCase(test.TestCase):
 
         with mock.patch.object(sfv,
                                '_issue_api_request',
-                               self.fake_issue_api_request),\
+                               self.fake_issue_api_request), \
                 mock.patch.object(sfv,
                                   '_get_sfaccount_by_name',
-                                  return_value={'accountID': 1}),\
+                                  return_value={'accountID': 1}), \
                 mock.patch.object(sfv,
                                   '_do_volume_create',
                                   return_value=model_update):
@@ -2807,13 +2806,13 @@ class SolidFireVolumeTestCase(test.TestCase):
         sfv = solidfire.SolidFireDriver(configuration=self.configuration)
         with mock.patch.object(sfv,
                                '_get_create_account',
-                               return_value={'accountID': 5}),\
+                               return_value={'accountID': 5}), \
                 mock.patch.object(sfv,
                                   '_retrieve_qos_setting',
                                   return_value=None), \
                 mock.patch.object(sfv,
                                   '_do_volume_create',
-                                  return_value={'provider_id': '1 2 xxxx'}),\
+                                  return_value={'provider_id': '1 2 xxxx'}), \
                 mock.patch.object(volume_types,
                                   'get_volume_type',
                                   return_value=fake_type), \
@@ -2833,7 +2832,7 @@ class SolidFireVolumeTestCase(test.TestCase):
         with mock.patch.object(volume_types, 'get_volume_type',
                                return_value=fake_type):
             res = sfv._extract_sf_attributes_from_extra_specs(type_id)
-            six.assertCountEqual(self, expected, res)
+            self.assertCountEqual(expected, res)
 
     def test_build_endpoint_with_kwargs(self):
         sfv = solidfire.SolidFireDriver(configuration=self.configuration)
@@ -3227,9 +3226,12 @@ class SolidFireVolumeTestCase(test.TestCase):
             fake_context, fake_cinder_vols, secondary_id='secondary',
             groups=None)
 
-        mock_failover.called_with(fake_context, fake_cinder_vols, "secondary",
-                                  None)
-        mock_failover_completed.called_with(fake_context, "secondary")
+        mock_failover.assert_called_once_with(fake_context,
+                                              fake_cinder_vols,
+                                              "secondary",
+                                              None)
+        mock_failover_completed.assert_called_once_with(fake_context,
+                                                        "secondary")
         self.assertEqual(cluster_id, "secondary")
         self.assertEqual(fake_failover_updates, updates)
 

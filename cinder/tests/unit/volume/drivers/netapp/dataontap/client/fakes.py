@@ -14,9 +14,9 @@
 #    under the License.
 
 from unittest import mock
+import urllib
 
 from lxml import etree
-from six.moves import urllib
 
 from cinder.tests.unit.volume.drivers.netapp.dataontap import fakes as fake
 import cinder.volume.drivers.netapp.dataontap.client.api as netapp_api
@@ -904,7 +904,7 @@ VOLUME_INFO_SSC = {
     'name': VOLUME_NAMES[0],
     'vserver': VOLUME_VSERVER_NAME,
     'junction-path': '/%s' % VOLUME_NAMES[0],
-    'aggregate': VOLUME_AGGREGATE_NAMES[0],
+    'aggregate': [VOLUME_AGGREGATE_NAMES[0]],
     'space-guarantee-enabled': True,
     'language': 'c.utf_8',
     'percentage-snapshot-reserve': '5',
@@ -2347,6 +2347,9 @@ LUN_GET_ITER_RESULT = [
         'OsType': LUN_GET_ITER_REST['records'][0]['os_type'],
         'SpaceReserved':
             LUN_GET_ITER_REST['records'][0]['space']['guarantee']['requested'],
+        'SpaceAllocated':
+            LUN_GET_ITER_REST['records'][0]['space']
+            ['scsi_thin_provisioning_support_enabled'],
         'UUID': LUN_GET_ITER_REST['records'][0]['uuid'],
     },
     {
@@ -2360,6 +2363,9 @@ LUN_GET_ITER_RESULT = [
         'OsType': LUN_GET_ITER_REST['records'][1]['os_type'],
         'SpaceReserved':
             LUN_GET_ITER_REST['records'][1]['space']['guarantee']['requested'],
+        'SpaceAllocated':
+            LUN_GET_ITER_REST['records'][1]['space']
+            ['scsi_thin_provisioning_support_enabled'],
         'UUID': LUN_GET_ITER_REST['records'][1]['uuid'],
     },
 ]
@@ -2865,6 +2871,7 @@ SNAPMIRROR_GET_ITER_RESPONSE_REST = {
                 "type": "async"
             },
             "state": "snapmirrored",
+            "transfer": {"state": "success"},
             "healthy": True
         }
     ],
@@ -2957,10 +2964,11 @@ REST_GET_SNAPMIRRORS_RESPONSE = [{
     'lag-time': None,
     'last-transfer-end-timestamp': None,
     'mirror-state': 'snapmirrored',
-    'relationship-status': 'snapmirrored',
+    'relationship-status': 'idle',
     'source-volume': SM_SOURCE_VOLUME,
     'source-vserver': SM_SOURCE_VSERVER,
     'uuid': FAKE_UUID,
+    'transferring-state': 'success',
 }]
 
 TRANSFERS_GET_ITER_REST = {

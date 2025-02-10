@@ -4,6 +4,7 @@ cinder/api/v3/types.py
 cinder/backup/api.py
 cinder/backup/manager.py
 cinder/backup/drivers/ceph.py
+cinder/backup/rpcapi.py
 cinder/common/constants.py
 cinder/context.py
 cinder/coordination.py
@@ -19,6 +20,7 @@ cinder/image/glance.py
 cinder/image/image_utils.py
 cinder/keymgr/transfer.py
 cinder/exception.py
+cinder/flow_utils.py
 cinder/manager.py
 cinder/objects/backup.py
 cinder/policy.py

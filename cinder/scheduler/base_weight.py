@@ -17,10 +17,8 @@
 Pluggable Weighing support
 """
 
-from __future__ import annotations
-
 import abc
-from typing import Iterable, Optional  # noqa: H301
+from typing import Iterable, Optional
 
 from oslo_log import log as logging
 

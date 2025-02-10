@@ -137,7 +137,7 @@ class LVMVolumeDriver(driver.VolumeDriver):
             'target_prefix', 'volumes_dir', 'target_secondary_ip_addresses',
             'target_port',
             'iscsi_write_cache', 'iscsi_target_flags',  # TGT
-            'iet_conf', 'iscsi_iotype',  # IET
+            'iscsi_iotype',  # IET
             'nvmet_port_id', 'nvmet_ns_id',  # NVMET
             'scst_target_iqn_name', 'scst_target_driver',  # SCST
             'spdk_rpc_ip', 'spdk_rpc_port', 'spdk_rpc_username',   # SPDKNVMF
@@ -525,14 +525,16 @@ class LVMVolumeDriver(driver.VolumeDriver):
         escaped_name = self._escape_snapshot(volume['name']).replace('-', '--')
         return "/dev/mapper/%s-%s" % (escaped_group, escaped_name)
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id,
+                             disable_sparse=False):
         """Fetch the image from image_service and write it to the volume."""
         image_utils.fetch_to_raw(context,
                                  image_service,
                                  image_id,
                                  self.local_path(volume),
                                  self.configuration.volume_dd_blocksize,
-                                 size=volume['size'])
+                                 size=volume['size'],
+                                 disable_sparse=disable_sparse)
 
     def copy_volume_to_image(self, context, volume, image_service, image_meta):
         """Copy the volume to the specified image."""

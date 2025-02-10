@@ -33,6 +33,7 @@ Volume backups can be created, restored, deleted and listed.
 
 import contextlib
 import os
+import typing
 
 from castellan import key_manager
 from eventlet import tpool
@@ -139,6 +140,7 @@ class BackupManager(manager.SchedulerDependentManager):
         self.service = importutils.import_class(self.driver_name)
         self.message_api = message_api.API()
 
+    @typing.no_type_check
     def init_host(self, **kwargs):
         """Run initialization needed for a standalone service."""
         ctxt = context.get_admin_context()
@@ -211,7 +213,13 @@ class BackupManager(manager.SchedulerDependentManager):
                               "snapshots for backup %(bkup)s.",
                               {'bkup': backup['id']})
 
-    def _cleanup_one_volume(self, ctxt, volume):
+    def _cleanup_one_volume(self, ctxt, volume_id):
+        try:
+            volume = objects.Volume.get_by_id(ctxt, volume_id)
+        except exception.VolumeNotFound:
+            LOG.info('Volume %s does not exist anymore. Ignoring.', volume_id)
+            return
+
         if volume['status'] == 'backing-up':
             self._detach_all_attachments(ctxt, volume)
             LOG.info('Resetting volume %(vol_id)s to previous '
@@ -227,23 +235,38 @@ class BackupManager(manager.SchedulerDependentManager):
             self.db.volume_update(ctxt, volume['id'],
                                   {'status': 'error_restoring'})
 
+    def _cleanup_one_snapshot(self, ctxt, snapshot_id):
+        try:
+            snapshot = objects.Snapshot.get_by_id(ctxt, snapshot_id)
+        except exception.SnapshotNotFound:
+            LOG.info('Snapshot %s does not exist anymore. Ignoring.',
+                     snapshot_id)
+            return
+        if snapshot['status'] == 'backing-up':
+            LOG.info('Resetting snapshot %(snap_id)s to previous '
+                     'status %(status)s (was backing-up).',
+                     {'snap_id': snapshot['id'],
+                      'status': fields.SnapshotStatus.AVAILABLE})
+
+            snapshot.status = fields.SnapshotStatus.AVAILABLE
+            snapshot.save()
+
     def _cleanup_one_backup(self, ctxt, backup):
         if backup['status'] == fields.BackupStatus.CREATING:
             LOG.info('Resetting backup %s to error (was creating).',
                      backup['id'])
-
-            volume = objects.Volume.get_by_id(ctxt, backup.volume_id)
-            self._cleanup_one_volume(ctxt, volume)
-
+            self._cleanup_one_volume(ctxt, backup.volume_id)
+            if backup.snapshot_id:
+                self._cleanup_one_snapshot(ctxt, backup.snapshot_id)
             err = 'incomplete backup reset on manager restart'
             volume_utils.update_backup_error(backup, err)
         elif backup['status'] == fields.BackupStatus.RESTORING:
             LOG.info('Resetting backup %s to '
                      'available (was restoring).',
                      backup['id'])
-            volume = objects.Volume.get_by_id(ctxt, backup.restore_volume_id)
-            self._cleanup_one_volume(ctxt, volume)
-
+            self._cleanup_one_volume(ctxt, backup.restore_volume_id)
+            if backup.snapshot_id:
+                self._cleanup_one_snapshot(ctxt, backup.snapshot_id)
             backup.status = fields.BackupStatus.AVAILABLE
             backup.save()
         elif backup['status'] == fields.BackupStatus.DELETING:
@@ -361,7 +384,7 @@ class BackupManager(manager.SchedulerDependentManager):
         self._notify_about_backup_usage(context, backup, "create.start")
 
         expected_status = "backing-up"
-        if snapshot_id:
+        if snapshot:
             actual_status = snapshot['status']
             if actual_status != expected_status:
                 err = _('Create backup aborted, expected snapshot status '
@@ -404,6 +427,9 @@ class BackupManager(manager.SchedulerDependentManager):
                     context,
                     detail=message_field.Detail.BACKUP_SERVICE_DOWN)
                 raise exception.InvalidBackup(reason=err)
+
+            if not backup.availability_zone:
+                backup.availability_zone = self.az
 
             backup.service = self.driver_name
             backup.save()
@@ -520,7 +546,7 @@ class BackupManager(manager.SchedulerDependentManager):
                                 message_field.Detail.DETACH_ERROR)
         except Exception as err:
             with excutils.save_and_reraise_exception():
-                if snapshot_id:
+                if snapshot:
                     snapshot.status = fields.SnapshotStatus.AVAILABLE
                     snapshot.save()
                 else:
@@ -812,7 +838,7 @@ class BackupManager(manager.SchedulerDependentManager):
                      {'volume_id': volume.id, 'backup_id': backup.id})
 
             key_mgr = key_manager.API(CONF)
-            if orig_key_id is not None:
+            if orig_key_id:
                 LOG.debug('Deleting original volume encryption key ID.')
                 volume_utils.delete_encryption_key(context,
                                                    key_mgr,

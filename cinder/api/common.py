@@ -13,14 +13,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from __future__ import annotations
-
 import enum
 import json
 import os
 import re
 import typing
-from typing import Any, Iterable, Optional, Union  # noqa: H301
+from typing import Any, Iterable, Optional, Union
 import urllib
 
 from oslo_config import cfg

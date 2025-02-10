@@ -1,4 +1,4 @@
-# Copyright (C) 2020, 2022, Hitachi, Ltd.
+# Copyright (C) 2020, 2024, Hitachi, Ltd.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -537,6 +537,7 @@ class RestApiClient():
                                  timeout=self.conf.hitachi_lock_timeout)
         if not err:
             self.set_my_session(self.Session(rsp["sessionId"], rsp["token"]))
+            self.nested_count = 0
             return True
         else:
             return False
@@ -574,6 +575,7 @@ class RestApiClient():
                 retry = self._has_session()
                 if not retry:
                     LOG.debug("Trying to re-login.")
+                    self.nested_count = 0
                     retry = self._login(do_raise=False)
                 if not retry:
                     self.output_log(
@@ -1023,6 +1025,16 @@ class RestApiClient():
         }
         body = {"parameters": {"virtualLdevId": virtual_ldev_id}}
         self._invoke(url, body=body)
+
+    def set_qos_specs(self, ldev_id, qos_specs):
+        url = '%(url)s/ldevs/%(id)s/actions/%(action)s/invoke' % {
+            'url': self.object_url,
+            'id': ldev_id,
+            'action': 'set-qos',
+        }
+        for (key, value) in qos_specs.items():
+            body = {'parameters': {key: value}}
+            self._invoke(url, body=body)
 
     def output_log(self, msg_enum, **kwargs):
         if self.is_rep:

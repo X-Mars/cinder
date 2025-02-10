@@ -34,6 +34,7 @@ from oslo_config import cfg
 from oslo_config import fixture as config_fixture
 from oslo_log.fixture import logging_error as log_fixture
 import oslo_messaging
+from oslo_messaging._drivers import impl_fake as fake_msging
 from oslo_messaging import conffixture as messaging_conffixture
 from oslo_serialization import jsonutils
 from oslo_utils import strutils
@@ -64,7 +65,6 @@ CONF = config.CONF
 
 _DB_CACHE = None
 DB_SCHEMA = None
-SESSION_CONFIGURED = False
 
 
 class TestingException(Exception):
@@ -76,16 +76,13 @@ class Database(fixtures.Fixture):
     def __init__(self):
         super().__init__()
 
-        # NOTE(lhx_): oslo_db.enginefacade is configured in tests the same
-        # way as it's done for any other services that uses the db
-        global SESSION_CONFIGURED
-        if not SESSION_CONFIGURED:
-            sqla_api.configure(CONF)
-            SESSION_CONFIGURED = True
-
         # Suppress logging for test runs
-        migrate_logger = logging.getLogger('migrate')
-        migrate_logger.setLevel(logging.WARNING)
+
+        alembic_logger = logging.getLogger('alembic.runtime.migration')
+        alembic_logger.setLevel(logging.WARNING)
+
+        db_logger = logging.getLogger('cinder.db.migration')
+        db_logger.setLevel(logging.WARNING)
 
     def setUp(self):
         super().setUp()
@@ -204,6 +201,9 @@ class TestCase(testtools.TestCase):
         rpc.add_extra_exmods("cinder.tests.unit")
         self.addCleanup(rpc.clear_extra_exmods)
         self.addCleanup(rpc.cleanup)
+        # TODO: Remove line after comment once the oslo.messaging fix merges
+        #       https://review.opendev.org/c/openstack/oslo.messaging/+/901018
+        self.addCleanup(fake_msging.FakeExchangeManager._exchanges.clear)
 
         self.messaging_conf = messaging_conffixture.ConfFixture(CONF)
         self.messaging_conf.transport_url = 'fake:/'

@@ -18,8 +18,6 @@ from copy import deepcopy
 from unittest import mock
 from unittest.mock import call
 
-import six
-
 from cinder import exception
 from cinder.objects import fields
 from cinder.tests.unit import test
@@ -107,6 +105,7 @@ class PowerMaxReplicationTest(test.TestCase):
         extra_specs[utils.PORTGROUPNAME] = self.data.port_group_name_f
         extra_specs[utils.IS_RE] = True
         extra_specs[utils.FORCE_VOL_EDIT] = True
+        extra_specs[utils.DISABLE_PROTECTED_SNAP] = False
         rep_config = self.data.rep_config_sync
         rep_config = deepcopy(self.data.rep_config_sync)
         rep_config[utils.RDF_CONS_EXEMPT] = False
@@ -299,7 +298,8 @@ class PowerMaxReplicationTest(test.TestCase):
         backend_id = self.data.rep_backend_id_sync
         rep_configs = self.common.rep_configs
         secondary_id, volume_update_list, group_update_list = (
-            self.common.failover_host(volumes, backend_id, groups))
+            self.common.failover(volumes, backend_id, groups))
+        self.common.failover_completed(backend_id)
         mck_validate.assert_called_once_with(
             False, backend_id, rep_configs, self.data.array, ['123'], False)
         mck_populate.assert_called_once_with(volumes, groups, None)
@@ -316,7 +316,7 @@ class PowerMaxReplicationTest(test.TestCase):
         backend_id = self.data.rep_backend_id_sync
         rep_configs = self.common.rep_configs
         self.assertRaises(exception.InvalidReplicationTarget,
-                          self.common.failover_host, volumes, backend_id)
+                          self.common.failover, volumes, backend_id)
         mck_validate.assert_called_once_with(
             False, backend_id, rep_configs, self.data.array, ['123'], False)
 
@@ -333,7 +333,8 @@ class PowerMaxReplicationTest(test.TestCase):
         backend_id = utils.PMAX_FAILOVER_START_ARRAY_PROMOTION
         rep_configs = self.common.rep_configs
         secondary_id, volume_update_list, group_update_list = (
-            self.common.failover_host(volumes, backend_id, groups))
+            self.common.failover(volumes, backend_id, groups))
+        self.common.failover_completed(backend_id)
         self.assertEqual(0, mck_populate.call_count)
         self.assertEqual(backend_id, secondary_id)
         self.assertEqual(list(), volume_update_list)
@@ -360,7 +361,8 @@ class PowerMaxReplicationTest(test.TestCase):
         rep_configs = self.common.rep_configs
         self.common.promotion = True
         secondary_id, volume_update_list, group_update_list = (
-            self.common.failover_host(volumes, backend_id, groups))
+            self.common.failover(volumes, backend_id, groups))
+        self.common.failover_completed(backend_id)
         mck_populate.assert_called_once_with(volumes, groups, None)
         mck_validate.assert_called_once_with(
             False, backend_id, rep_configs, self.data.array, ['123'], True)
@@ -499,7 +501,8 @@ class PowerMaxReplicationTest(test.TestCase):
         extra_specs['rep_mode'] = utils.REP_ASYNC
         with mock.patch.object(common.PowerMaxCommon, '_initial_setup',
                                return_value=extra_specs):
-            self.async_driver.common.failover_host(volumes, None, [])
+            self.async_driver.common.failover(volumes, None, [])
+        self.common.failover_completed(None)
         mock_fg.assert_called_once()
 
     @mock.patch.object(rest.PowerMaxRest,
@@ -631,7 +634,7 @@ class PowerMaxReplicationTest(test.TestCase):
             array_map)
         array_info = finalarrayinfolist[0]
         ref_info = deepcopy(array_info)
-        ref_info['SerialNumber'] = six.text_type(rep_config['array'])
+        ref_info['SerialNumber'] = str(rep_config['array'])
         ref_info['srpName'] = rep_config['srp']
         secondary_info = self.common.get_secondary_stats_info(
             rep_config, array_info)
@@ -868,10 +871,10 @@ class PowerMaxReplicationTest(test.TestCase):
         volume = self.data.test_volume
         ref_model_update = {
             'metadata': {'BackendID': 'None'},
-            'provider_location': six.text_type({
+            'provider_location': str({
                 'device_id': self.data.device_id,
                 'array': self.data.array}),
-            'replication_driver_data': six.text_type({
+            'replication_driver_data': str({
                 'device_id': self.data.device_id2,
                 'array': self.data.remote_array}),
             'replication_status': fields.ReplicationStatus.ENABLED}
@@ -928,7 +931,7 @@ class PowerMaxReplicationTest(test.TestCase):
         return_value=tpd.PowerMaxData.rep_extra_specs_rep_config)
     def test_create_rep_volume(self, mck_initial, mck_create, mck_meta):
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.provider_location),
+            {'provider_location': str(self.data.provider_location),
              'replication_driver_data': (
                  tpd.PowerMaxData.provider_location2),
              'metadata': {'BackendID': self.data.rep_backend_id_sync,
@@ -951,7 +954,7 @@ class PowerMaxReplicationTest(test.TestCase):
             tpd.PowerMaxData.replication_update, {}))
     def test_create_rep_volume_from_snapshot(self, mck_meta, mck_clone_chk):
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.provider_location),
+            {'provider_location': str(self.data.provider_location),
              'metadata': {'BackendID': self.data.rep_backend_id_sync}})
         ref_model_update.update(self.data.replication_update)
         model_update = self.common.create_volume_from_snapshot(
@@ -971,7 +974,7 @@ class PowerMaxReplicationTest(test.TestCase):
         metadata = deepcopy(self.data.volume_metadata)
         metadata['BackendID'] = self.data.rep_backend_id_sync
         ref_model_update = {
-            'provider_location': six.text_type(
+            'provider_location': str(
                 self.data.provider_location_clone),
             'metadata': metadata}
         ref_model_update.update(self.data.replication_update)
@@ -1639,7 +1642,7 @@ class PowerMaxReplicationTest(test.TestCase):
                        'device_uuid': self.data.volume_id}
         ref_replication_update = (
             {'replication_status': common.REPLICATION_ENABLED,
-             'replication_driver_data': six.text_type(
+             'replication_driver_data': str(
                  {'array': self.data.remote_array,
                   'device_id': self.data.device_id2})})
 
@@ -2231,9 +2234,9 @@ class PowerMaxReplicationTest(test.TestCase):
     @mock.patch.object(masking.PowerMaxMasking,
                        'add_volumes_to_storage_group')
     def test_add_replicated_volumes_to_default_storage_group(self, mock_add):
-        volumes_model_update = [{'provider_location': six.text_type(
+        volumes_model_update = [{'provider_location': str(
             self.data.provider_location),
-            'replication_driver_data': six.text_type(
+            'replication_driver_data': str(
                 {'array': self.data.remote_array,
                  'device_id': self.data.device_id2})}]
         rep_extra_specs = deepcopy(self.data.rep_extra_specs)

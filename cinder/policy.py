@@ -17,7 +17,7 @@
 
 import sys
 import typing
-from typing import Optional, Type  # noqa: H301
+from typing import Optional, Type
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -32,8 +32,14 @@ from cinder import policies
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
+# TODO(gmann): Remove overriding the default value of config options:
+# - 'enforce_scope', and 'enforce_new_defaults' once cinder is ready with the
+# new RBAC (oslo_policy enable them by default)
 DEFAULT_POLICY_FILENAME = 'policy.yaml'
-policy_opts.set_defaults(cfg.CONF, DEFAULT_POLICY_FILENAME)
+policy_opts.set_defaults(
+    cfg.CONF,
+    enforce_scope=False,
+    enforce_new_defaults=False)
 
 _ENFORCER: Optional[policy.Enforcer] = None
 

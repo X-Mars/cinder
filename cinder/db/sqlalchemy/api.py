@@ -78,25 +78,13 @@ from cinder.volume import volume_utils
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
+
 # Map with cases where attach status differs from volume status
 ATTACH_STATUS_MAP = {'attached': 'in-use', 'detached': 'available'}
-
 
 options.set_defaults(CONF, connection='sqlite:///$state_path/cinder.sqlite')
 
 main_context_manager = enginefacade.transaction_context()
-
-
-def configure(conf):
-    main_context_manager.configure(**dict(conf.database))
-    # NOTE(geguileo): To avoid a cyclical dependency we import the
-    # group here.  Dependency cycle is objects.base requires db.api,
-    # which requires db.sqlalchemy.api, which requires service which
-    # requires objects.base
-    CONF.import_group("profiler", "cinder.service")
-    if CONF.profiler.enabled:
-        if CONF.profiler.trace_sqlalchemy:
-            lambda eng: osprofiler_sqlalchemy.add_tracing(sa, eng, "db")
 
 
 def get_engine():
@@ -418,7 +406,7 @@ def condition_not_db_filter(model, field, value, auto_none=True):
     If auto_none is True then we'll consider NULL values as different as well,
     like we do in Python and not like SQL does.
     """
-    result = ~condition_db_filter(model, field, value)
+    result = ~condition_db_filter(model, field, value)  # pylint: disable=E1130
 
     if auto_none and (
         (
@@ -668,17 +656,6 @@ def _sync_gigabytes(
     return {key: vol_gigs + snap_gigs}
 
 
-def _sync_consistencygroups(
-    context,
-    project_id,
-    volume_type_id=None,
-    volume_type_name=None,
-):
-    _, groups = _consistencygroup_data_get_for_project(context, project_id)
-    key = 'consistencygroups'
-    return {key: groups}
-
-
 def _sync_backup_gigabytes(
     context,
     project_id,
@@ -709,7 +686,6 @@ QUOTA_SYNC_FUNCTIONS = {
     '_sync_volumes': _sync_volumes,
     '_sync_snapshots': _sync_snapshots,
     '_sync_gigabytes': _sync_gigabytes,
-    '_sync_consistencygroups': _sync_consistencygroups,
     '_sync_backups': _sync_backups,
     '_sync_backup_gigabytes': _sync_backup_gigabytes,
     '_sync_groups': _sync_groups,
@@ -813,7 +789,7 @@ def _clustered_bool_field_filter(query, field_name, filter_value):
             ),
         )
         if not filter_value:
-            query_filter = ~query_filter
+            query_filter = ~query_filter  # pylint: disable=E1130
         query = query.filter(query_filter)
     return query
 
@@ -960,21 +936,32 @@ def service_create(context, values):
 
 
 @require_admin_context
-@oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
 @main_context_manager.writer
-def service_update(context, service_id, values):
-    query = _service_query(context, id=service_id)
+def service_update(context, service_id, values, retry=True):
+    def _service_update(context, service_id, values):
+        query = _service_query(context, id=service_id)
 
-    if 'disabled' in values:
-        entity = query.column_descriptions[0]['entity']
+        if 'disabled' in values:
+            entity = query.column_descriptions[0]['entity']
 
-        values = values.copy()
-        values['modified_at'] = values.get('modified_at', timeutils.utcnow())
-        values['updated_at'] = values.get('updated_at', entity.updated_at)
+            values = values.copy()
+            values['modified_at'] = values.get('modified_at',
+                                               timeutils.utcnow())
+            values['updated_at'] = values.get('updated_at',
+                                              entity.updated_at)
 
-    result = query.update(values)
-    if not result:
-        raise exception.ServiceNotFound(service_id=service_id)
+        result = query.update(values)
+        if not result:
+            raise exception.ServiceNotFound(service_id=service_id)
+
+    @oslo_db_api.wrap_db_retry(max_retries=5, retry_on_deadlock=True)
+    def _service_update_retry(context, service_id, values):
+        _service_update(context, service_id, values)
+
+    if retry:
+        _service_update_retry(context, service_id, values)
+    else:
+        _service_update(context, service_id, values)
 
 
 ###################
@@ -2091,32 +2078,10 @@ def _volume_data_get_for_project(
         context, func.count(model.id), func.sum(model.size), read_deleted="no"
     ).filter_by(project_id=project_id)
 
-    # When calling the method for quotas we don't count volumes that are the
-    # destination of a migration since they were not accounted for quotas or
-    # reservations in the first place.
-    # Also skip temporary volumes that have 'temporary' admin_metadata key set
-    # to True.
+    # By default we skip temporary resources creted for internal usage and
+    # migration destination volumes.
     if skip_internal:
-        # TODO: (Y release) replace everything inside this if with:
-        #       query = query.filter(model.use_quota)
-        admin_model = models.VolumeAdminMetadata
-        query = query.filter(
-            and_(
-                or_(
-                    model.migration_status.is_(None),
-                    ~model.migration_status.startswith('target:'),
-                ),
-                ~model.use_quota.is_(False),
-                ~sql.exists().where(
-                    and_(
-                        model.id == admin_model.volume_id,
-                        ~admin_model.deleted,
-                        admin_model.key == 'temporary',
-                        admin_model.value == 'True',
-                    )
-                ),
-            )
-        )
+        query = query.filter(model.use_quota)
 
     if host:
         query = query.filter(_filter_host(model.host, host))
@@ -2890,6 +2855,32 @@ def volume_get_all_by_group(context, group_id, filters=None):
         if query is None:
             return []
     return query.all()
+
+
+@require_admin_context
+@main_context_manager.writer
+def volume_update_all_by_service(context):
+    """Ensure volumes have the correct service_uuid value for their host.
+
+    In some deployment tools, when performing an upgrade, all service records
+    are recreated including c-vol service which gets a new record in the
+    services table, though its host name is constant. Later we then delete the
+    old service record.
+    As a consequence, the volumes have the right host name but the service
+    UUID needs to be updated to the ID of the new service record.
+
+    :param context: context to query under
+    """
+    # Get all cinder-volume services
+    services = service_get_all(context, binary='cinder-volume')
+    for service in services:
+        query = model_query(context, models.Volume)
+        query = query.filter(
+            _filter_host(
+                models.Volume.host, service.host),
+            models.Volume.service_uuid != service.uuid)
+        query.update(
+            {"service_uuid": service.uuid}, synchronize_session=False)
 
 
 @require_context
@@ -4106,9 +4097,7 @@ def _snapshot_data_get_for_project(
         read_deleted="no",
     )
     if skip_internal:
-        # TODO: (Y release) replace next line with:
-        #        query = query.filter(models.Snapshot.use_quota)
-        query = query.filter(~models.Snapshot.use_quota.is_(False))
+        query = query.filter(models.Snapshot.use_quota)
 
     if volume_type_id or host:
         query = query.join(models.Snapshot.volume)
@@ -8627,84 +8616,22 @@ def worker_destroy(context, **filters):
 ###############################
 
 
-# TODO: (Y Release) remove method and this comment
+# TODO: (D Release) remove method and this comment
 @enginefacade.writer
-def volume_use_quota_online_data_migration(context, max_count):
-    def calculate_use_quota(volume):
-        is_migrating = (volume.migration_status or '').startswith('target:')
-        is_temporary = False
-        if volume.volume_admin_metadata:
-            for admin_meta in volume.volume_admin_metadata:
-                if (admin_meta.key == 'temporary') and (
-                    admin_meta.value == 'True'
-                ):
-                    is_temporary = True
-                    break
-        return not (is_migrating or is_temporary)
-
-    return use_quota_online_data_migration(
-        context,
-        max_count,
-        'Volume',
-        calculate_use_quota,
-    )
-
-
-# TODO: (Y Release) remove method and this comment
-@enginefacade.writer
-def snapshot_use_quota_online_data_migration(context, max_count):
-    # Temp snapshots are created in
-    # - cinder.volume.manager.VolumeManager._create_backup_snapshot
-    # - cinder.volume.driver.BaseVD.driver _create_temp_snapshot
-    #
-    # But we don't have a "good" way to know which ones are temporary as the
-    # only identification is the display_name that can be "forged" by users.
-    # Most users are not doing rolling upgrades so we'll assume there are no
-    # temporary snapshots, not even volumes with display_name:
-    # - '[revert] volume %s backup snapshot' % resource.volume_id
-    # - 'backup-snap-%s' % resource.volume_id
-    return use_quota_online_data_migration(
-        context,
-        max_count,
-        'Snapshot',
-        lambda snapshot: True,
-    )
-
-
-# TODO: (Y Release) remove method and this comment
-def use_quota_online_data_migration(
-    context,
-    max_count,
-    resource_name,
-    calculate_use_quota,
-):
-    updated = 0
-    query = model_query(context, getattr(models, resource_name)).filter_by(
-        use_quota=None
-    )
-    if resource_name == 'Volume':
-        query = query.options(joinedload(models.Volume.volume_admin_metadata))
+def remove_temporary_admin_metadata_data_migration(context, max_count):
+    admin_meta_table = models.VolumeAdminMetadata
+    query = model_query(context,
+                        admin_meta_table.id).filter_by(key='temporary')
     total = query.count()
-    resources = query.limit(max_count).with_for_update().all()
-    for resource in resources:
-        resource.use_quota = calculate_use_quota(resource)
-        updated += 1
+    ids_query = query.limit(max_count).subquery()
+    update_args = {'synchronize_session': False}
+
+    # We cannot use limit with update or delete so create a new query
+    updated = model_query(context, admin_meta_table).\
+        filter(admin_meta_table.id.in_(ids_query)).\
+        update(admin_meta_table.delete_values(), **update_args)
 
     return total, updated
-
-
-# TODO: (Z Release) remove method and this comment
-# TODO: (Y Release) uncomment method
-# @enginefacade.writer
-# def remove_temporary_admin_metadata_data_migration(context, max_count):
-#     query = model_query(
-#         context, models.VolumeAdminMetadata,
-#     ).filter_by(key='temporary')
-#     total = query.count()
-#     updated = query.limit(max_count).update(
-#         models.VolumeAdminMetadata.delete_values)
-#
-#     return total, updated
 
 
 ###############################
@@ -8763,3 +8690,8 @@ CALCULATE_COUNT_HELPERS = {
     'snapshot': (_snaps_get_query, _process_snaps_filters),
     'backup': (_backups_get_query, _process_backups_filters),
 }
+
+
+def get_projects(context, model, read_deleted="no"):
+    return model_query(context, model, read_deleted=read_deleted).\
+        with_entities(sa.Column('project_id')).distinct().all()

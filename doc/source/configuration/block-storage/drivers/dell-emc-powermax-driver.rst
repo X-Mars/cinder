@@ -59,6 +59,18 @@ Guide` at the `Dell Support`_ site.
    | OpenStack | Unisphere    | PowerMax OS | Supported Arrays               |
    | release   | for PowerMax |             |                                |
    +===========+==============+=============+================================+
+   | Caracal   | 10.1.0       | 10.1.0      | PowerMax 2500,8500             |
+   |           |              | (6079.225)  |                                |
+   |           |              +-------------+--------------------------------+
+   |           |              | 5978.711    | PowerMax 2000,8000             |
+   |           |              |             | VMAX 250F, 450F, 850F, 950F    |
+   +-----------+--------------+-------------+--------------------------------+
+   | Bobcat    | 10.0.1       | 10.0.1      | PowerMax 2500,8500             |
+   |           |              | (6079.175)  |                                |
+   |           |              +-------------+--------------------------------+
+   |           |              | 5978.711    | PowerMax 2000,8000             |
+   |           |              |             | VMAX 250F, 450F, 850F, 950F    |
+   +-----------+--------------+-------------+--------------------------------+
    | Antelope  | 10.0.1       | 10.0.1      | PowerMax 2500,8500             |
    |           |              | (6079.175)  |                                |
    |           |              +-------------+--------------------------------+
@@ -251,6 +263,7 @@ PowerMax drivers also support the following features:
 -  Snap id support
 -  Seamless Live Migration from SMI-S support
 -  Port group & port performance load balancing
+-  Cinder volume active/active support
 
 .. note::
 
@@ -2418,6 +2431,16 @@ failover promotion.
    # cinder service-list
    # cinder service-enable <host> <binary>
 
+.. note::
+
+   With Cinder volume active/active deployment, use the following commands to
+   view and enable the cluster as well.
+
+   .. code-block:: console
+
+      # cinder --os-volume-api-version 3.17 cluster-list
+      # cinder --os-volume-api-version 3.17 cluster-enable [<binary>] <cluster-name>
+
 4. Remove all volumes from volume groups
 
 .. code-block:: console
@@ -3219,6 +3242,9 @@ options are detailed in the table below.
     |                             |                |                 | | real-time performance metrics in     |
     |                             |                |                 | | load calculation, minimum of 1       |
     |                             |                |                 | | maximum of 60 (24 hours).            |
+    +-----------------------------+----------------+-----------------+----------------------------------------+
+    | ``snapvx_unlink_symforce``  | ``True/False`` | ``False``       | | Enable/disable symforce              |
+    |                             |                |                 | | for SnapVx unlink.                   |
     +-----------------------------+----------------+-----------------+----------------------------------------+
     | ``port_group_load_metric``  | See below      | ``PercentBusy`` | | Metric used for port group load      |
     |                             |                |                 | | calculation.                         |

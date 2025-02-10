@@ -789,7 +789,8 @@ class WindowsSmbFsTestCase(test.TestCase):
 
             fake_upload_volume.assert_called_once_with(
                 mock.sentinel.context, mock.sentinel.image_service,
-                fake_image_meta, upload_path, volume_format=fake_img_format,
+                fake_image_meta, upload_path, volume_fd=None,
+                volume_format=fake_img_format,
                 store_id='fake-store', base_image_ref=None, compress=True,
                 run_as_root=True)
 
@@ -816,7 +817,8 @@ class WindowsSmbFsTestCase(test.TestCase):
                 mock.sentinel.image_id,
                 self._FAKE_VOLUME_PATH, mock.sentinel.volume_format,
                 mock.sentinel.block_size,
-                mock_get_vhd_type.return_value)
+                mock_get_vhd_type.return_value,
+                disable_sparse=False)
             drv._vhdutils.resize_vhd.assert_called_once_with(
                 self._FAKE_VOLUME_PATH,
                 self.volume.size * units.Gi,

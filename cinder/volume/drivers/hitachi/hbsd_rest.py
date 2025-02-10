@@ -1,4 +1,4 @@
-# Copyright (C) 2020, 2023, Hitachi, Ltd.
+# Copyright (C) 2020, 2024, Hitachi, Ltd.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -360,11 +360,24 @@ class HBSDREST(common.HBSDCommon):
             body['endLdevId'] = max_ldev
         return self.client.add_ldev(body, no_log=True)
 
-    def create_ldev(self, size, extra_specs, pool_id, ldev_range):
+    def set_qos_specs(self, ldev, qos_specs):
+        self.client.set_qos_specs(ldev, qos_specs)
+
+    def create_ldev(self, size, extra_specs, pool_id, ldev_range,
+                    qos_specs=None):
         """Create an LDEV of the specified size and the specified type."""
         ldev = self._create_ldev_on_storage(
             size, extra_specs, pool_id, ldev_range)
         LOG.debug('Created logical device. (LDEV: %s)', ldev)
+        if qos_specs:
+            try:
+                self.set_qos_specs(ldev, qos_specs)
+            except Exception:
+                with excutils.save_and_reraise_exception():
+                    try:
+                        self.delete_ldev(ldev)
+                    except exception.VolumeDriverException:
+                        self.output_log(MSG.DELETE_LDEV_FAILED, ldev=ldev)
         return ldev
 
     def modify_ldev_name(self, ldev, name):
@@ -522,9 +535,22 @@ class HBSDREST(common.HBSDCommon):
             self._create_clone_pair(pvol, svol, snap_pool_id)
 
     def get_ldev_info(self, keys, ldev, **kwargs):
-        """Return a dictionary of LDEV-related items."""
+        """Return a dictionary of LDEV-related items.
+
+        :param keys: LDEV Attributes to be obtained. Specify None to obtain all
+        LDEV attributes.
+        :type keys: list or NoneType
+        :param int ldev: The LDEV ID
+        :param dict kwargs: REST API options
+        :return: LDEV info
+        :rtype: dict
+        """
         d = {}
         result = self.client.get_ldev(ldev, **kwargs)
+        if not keys:
+            # To avoid KeyError when accessing a missing attribute, set the
+            # default value to None.
+            return defaultdict(lambda: None, result)
         for key in keys:
             d[key] = result.get(key)
         return d
@@ -909,10 +935,17 @@ class HBSDREST(common.HBSDCommon):
 
         return pvol, [{'ldev': svol, 'is_psus': is_psus, 'status': status}]
 
-    def get_pair_info(self, ldev):
-        """Return info of the volume pair."""
+    def get_pair_info(self, ldev, ldev_info=None):
+        """Return info of the volume pair.
+
+        :param int ldev: The LDEV ID
+        :param dict ldev_info: LDEV info
+        :return: TI pair info if the LDEV has TI pairs, None otherwise
+        :rtype: dict or NoneType
+        """
         pair_info = {}
-        ldev_info = self.get_ldev_info(['status', 'attributes'], ldev)
+        if ldev_info is None:
+            ldev_info = self.get_ldev_info(['status', 'attributes'], ldev)
         if (ldev_info['status'] != NORMAL_STS or
                 self.driver_info['pair_attr'] not in ldev_info['attributes']):
             return None
@@ -1276,8 +1309,12 @@ class HBSDREST(common.HBSDCommon):
                 pool_id = self.get_pool_id_of_volume(snapshot.volume)
                 ldev_range = self.storage_info['ldev_range']
                 extra_specs = self.get_volume_extra_specs(snapshot.volume)
+                qos_specs = utils.get_qos_specs_from_volume(snapshot)
                 pair['svol'] = self.create_ldev(size, extra_specs,
-                                                pool_id, ldev_range)
+                                                pool_id, ldev_range,
+                                                qos_specs=qos_specs)
+                self.modify_ldev_name(pair['svol'],
+                                      snapshot.id.replace("-", ""))
             except Exception as exc:
                 pair['msg'] = utils.get_exception_msg(exc)
             raise loopingcall.LoopingCallDone(pair)
@@ -1466,6 +1503,10 @@ class HBSDREST(common.HBSDCommon):
                 (ldev_range and
                  (pvol < ldev_range[0] or ldev_range[1] < pvol))):
             extra_specs = self.get_volume_extra_specs(volume)
+            if new_type:
+                qos_specs = utils.get_qos_specs_from_volume_type(new_type)
+            else:
+                qos_specs = utils.get_qos_specs_from_volume(volume)
             snap_pool_id = host['capabilities']['location_info'].get(
                 'snap_pool_id')
             ldev_range = host['capabilities']['location_info'].get(
@@ -1473,7 +1514,7 @@ class HBSDREST(common.HBSDCommon):
             svol = self.copy_on_storage(
                 pvol, volume.size, extra_specs, new_pool_id,
                 snap_pool_id, ldev_range,
-                is_snapshot=False, sync=True)
+                is_snapshot=False, sync=True, qos_specs=qos_specs)
             self.modify_ldev_name(svol, volume['id'].replace("-", ""))
 
             try:
@@ -1518,6 +1559,9 @@ class HBSDREST(common.HBSDCommon):
 
         def _check_specs_diff(diff, allowed_extra_specs):
             for specs_key, specs_val in diff.items():
+                if specs_key == 'qos_specs':
+                    diff_items.append(specs_key)
+                    continue
                 for diff_key, diff_val in specs_val.items():
                     if (specs_key == 'extra_specs' and
                             diff_key in allowed_extra_specs):
@@ -1571,6 +1615,12 @@ class HBSDREST(common.HBSDCommon):
 
             self._modify_capacity_saving(ldev, new_dr_mode)
 
+        if 'qos_specs' in diff_items:
+            old_qos_specs = self.get_qos_specs_from_ldev(ldev)
+            new_qos_specs = utils.get_qos_specs_from_volume_type(new_type)
+            if old_qos_specs != new_qos_specs:
+                self.change_qos_specs(ldev, old_qos_specs, new_qos_specs)
+
         return True
 
     def wait_copy_completion(self, pvol, svol):
@@ -1601,3 +1651,18 @@ class HBSDREST(common.HBSDCommon):
             '_', host[:max_host_len])
         return self.format_info['group_name_format'].format(
             host=host, wwn=wwn, ip=ip)
+
+    def change_qos_specs(self, ldev, old_qos_specs, new_qos_specs):
+        delete_specs = {key: 0 for key in old_qos_specs
+                        if key in utils.QOS_KEYS}
+        if delete_specs:
+            self.client.set_qos_specs(ldev, delete_specs)
+        if new_qos_specs:
+            self.client.set_qos_specs(ldev, new_qos_specs)
+
+    def get_qos_specs_from_ldev(self, ldev):
+        params = {'detailInfoType': 'qos',
+                  'headLdevId': ldev,
+                  'count': 1}
+        ldev_info = self.client.get_ldevs(params=params)[0]
+        return ldev_info.get('qos', {})

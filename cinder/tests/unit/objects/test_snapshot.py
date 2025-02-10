@@ -14,15 +14,14 @@
 
 import copy
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import ddt
 from oslo_utils import timeutils
-import pytz
 
 from cinder.db.sqlalchemy import models
 from cinder import exception
 from cinder import objects
-from cinder.objects import base as ovo_base
 from cinder.objects import fields
 from cinder.tests.unit import fake_constants as fake
 from cinder.tests.unit import fake_snapshot
@@ -132,8 +131,9 @@ class TestSnapshot(test_objects.BaseObjectsTestCase):
         self.assertTrue(admin_context.is_admin)
         self.assertTrue(snapshot.deleted)
         self.assertEqual(fields.SnapshotStatus.DELETED, snapshot.status)
-        self.assertEqual(utcnow_mock.return_value.replace(tzinfo=pytz.UTC),
-                         snapshot.deleted_at)
+        self.assertEqual(
+            utcnow_mock.return_value.replace(tzinfo=ZoneInfo('UTC')),
+            snapshot.deleted_at)
 
     @mock.patch('cinder.db.snapshot_metadata_delete')
     def test_delete_metadata_key(self, snapshot_metadata_delete):
@@ -229,17 +229,6 @@ class TestSnapshot(test_objects.BaseObjectsTestCase):
             mock.call.__bool__(),
             mock.call(self.context,
                       fake.SNAPSHOT_ID)])
-
-    @ddt.data('1.38', '1.39')
-    def test_obj_make_compatible_use_quota_added(self, version):
-        snapshot = objects.Snapshot(self.context, use_quota=False)
-
-        serializer = ovo_base.CinderObjectSerializer(version)
-        primitive = serializer.serialize_entity(self.context, snapshot)
-
-        converted_snapshot = objects.Snapshot.obj_from_primitive(primitive)
-        expected = version != '1.39'
-        self.assertIs(expected, converted_snapshot.use_quota)
 
 
 class TestSnapshotList(test_objects.BaseObjectsTestCase):

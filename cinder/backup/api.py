@@ -17,18 +17,16 @@
 
 """Handles all requests relating to the volume backups service."""
 
-from __future__ import annotations
-
 from datetime import datetime
 import random
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from eventlet import greenthread
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import strutils
-from pytz import timezone
 
 from cinder.backup import rpcapi as backup_rpcapi
 from cinder.common import constants
@@ -182,8 +180,7 @@ class API(base.Base):
         idx = 0
         while idx < len(services):
             srv = services[idx]
-            if(self._az_matched(srv, availability_zone) and
-               srv.is_up):
+            if (self._az_matched(srv, availability_zone) and srv.is_up):
                 return srv.host
             idx = idx + 1
         return None
@@ -301,7 +298,7 @@ class API(base.Base):
                     if (x['status'] == fields.BackupStatus.AVAILABLE and (
                         not snapshot or (snapshot and x['data_timestamp']
                                          < snapshot['created_at'])))
-                    else datetime(1, 1, 1, 1, 1, 1, tzinfo=timezone('UTC')))
+                    else datetime(1, 1, 1, 1, 1, 1, tzinfo=ZoneInfo('UTC')))
             else:
                 QUOTAS.rollback(context, reservations)
                 msg = _('No backups available to do an incremental backup.')
@@ -349,7 +346,8 @@ class API(base.Base):
             'data_timestamp': data_timestamp,
             'parent': parent,
             'host': latest_host,
-            'metadata': metadata or {}
+            'metadata': metadata or {},
+            'availability_zone': availability_zone
         }
         try:
             backup = objects.Backup(context=context, **kwargs)

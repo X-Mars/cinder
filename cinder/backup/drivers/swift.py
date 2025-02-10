@@ -192,7 +192,8 @@ class SwiftBackupDriver(chunkeddriver.ChunkedBackupDriver):
 
         sa_plugin = service_auth.get_service_auth_plugin()
         if sa_plugin is not None:
-            result['X-Service-Token'] = sa_plugin.get_token()
+            sa_session = service_auth.get_service_session()
+            result['X-Service-Token'] = sa_plugin.get_token(session=sa_session)
 
         return result
 
@@ -419,6 +420,9 @@ class SwiftBackupDriver(chunkeddriver.ChunkedBackupDriver):
                                     headers=self._headers())
         except socket.error as err:
             raise exception.SwiftConnectionFailed(reason=err)
+        except swift_exc.ClientException as err:
+            if err.http_status != 404:
+                raise
 
     def _generate_object_name_prefix(self, backup):
         """Generates a Swift backup object name prefix."""
@@ -449,7 +453,8 @@ class SwiftBackupDriver(chunkeddriver.ChunkedBackupDriver):
                         "possible we could have problems because of it.")
             return
         conn = swift.Connection(retries=CONF.backup_swift_retry_attempts,
-                                preauthurl=CONF.backup_swift_url)
+                                preauthurl=CONF.backup_swift_url,
+                                cacert=CONF.backup_swift_ca_cert_file)
         try:
             conn.get_capabilities()
             # TODO(e0ne) catch less general exception

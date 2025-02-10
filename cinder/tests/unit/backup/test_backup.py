@@ -90,6 +90,7 @@ class BaseBackupTest(test.TestCase):
                                 snapshot_id=None,
                                 metadata=None,
                                 parent_id=None,
+                                availability_zone='1',
                                 encryption_key_id=None):
         """Create a backup entry in the DB.
 
@@ -101,7 +102,7 @@ class BaseBackupTest(test.TestCase):
         kwargs['user_id'] = str(uuid.uuid4())
         kwargs['project_id'] = project_id
         kwargs['host'] = 'testhost'
-        kwargs['availability_zone'] = '1'
+        kwargs['availability_zone'] = availability_zone
         kwargs['display_name'] = display_name
         kwargs['display_description'] = display_description
         kwargs['container'] = container
@@ -443,10 +444,22 @@ class BackupTestCase(BaseBackupTest):
                                                  previous_status='available')
         volume = db.volume_get(self.ctxt, volume_id)
 
-        self.backup_mgr._cleanup_one_volume(self.ctxt, volume)
+        self.backup_mgr._cleanup_one_volume(self.ctxt, volume_id)
 
         volume = db.volume_get(self.ctxt, volume_id)
         self.assertEqual('available', volume['status'])
+
+    def test_cleanup_one_backing_up_snapshot(self):
+        """Test cleanup_one_snapshot for snapshot status 'backing-up'."""
+
+        volume_id = str(uuid.uuid4())
+        snapshot_entry = self._create_snapshot_db_entry(status='backing-up',
+                                                        volume_id=volume_id)
+
+        self.backup_mgr._cleanup_one_snapshot(self.ctxt, snapshot_entry.id)
+
+        snapshot = db.snapshot_get(self.ctxt, snapshot_entry.id)
+        self.assertEqual('available', snapshot['status'])
 
     def test_cleanup_one_restoring_backup_volume(self):
         """Test cleanup_one_volume for volume status 'restoring-backup'."""
@@ -454,10 +467,50 @@ class BackupTestCase(BaseBackupTest):
         volume_id = self._create_volume_db_entry(status='restoring-backup')
         volume = db.volume_get(self.ctxt, volume_id)
 
-        self.backup_mgr._cleanup_one_volume(self.ctxt, volume)
+        self.backup_mgr._cleanup_one_volume(self.ctxt, volume_id)
 
         volume = db.volume_get(self.ctxt, volume_id)
         self.assertEqual('error_restoring', volume['status'])
+
+    @ddt.data(fields.BackupStatus.CREATING,
+              fields.BackupStatus.RESTORING)
+    def test_cleanup_one_backup_with_deleted_volume(self, backup_status):
+        """Test cleanup_one_backup for non-existing volume."""
+
+        volume_id = str(uuid.uuid4())
+        backup = self._create_backup_db_entry(
+            status=backup_status,
+            volume_id=volume_id,
+            restore_volume_id=volume_id
+        )
+
+        mock_log = self.mock_object(manager, 'LOG')
+        self.backup_mgr._cleanup_one_backup(self.ctxt, backup)
+
+        mock_log.info.assert_called_with(
+            'Volume %s does not exist anymore. Ignoring.', volume_id
+        )
+
+    @ddt.data(fields.BackupStatus.CREATING,
+              fields.BackupStatus.RESTORING)
+    def test_cleanup_one_backup_with_deleted_snapshot(self, backup_status):
+        """Test cleanup_one_backup for non-existing volume."""
+
+        volume_id = str(uuid.uuid4())
+        snapshot_id = str(uuid.uuid4())
+        backup = self._create_backup_db_entry(
+            status=backup_status,
+            volume_id=volume_id,
+            restore_volume_id=volume_id,
+            snapshot_id=snapshot_id
+        )
+
+        mock_log = self.mock_object(manager, 'LOG')
+        self.backup_mgr._cleanup_one_backup(self.ctxt, backup)
+
+        mock_log.info.assert_called_with(
+            'Snapshot %s does not exist anymore. Ignoring.', snapshot_id
+        )
 
     def test_cleanup_one_creating_backup(self):
         """Test cleanup_one_backup for volume status 'creating'."""
@@ -2295,3 +2348,64 @@ class BackupAPITestCase(BaseBackupTest):
                           volume_id, None,
                           incremental=is_incremental)
         mock_rollback.assert_called_with(self.ctxt, "fake_reservation")
+
+    @mock.patch('cinder.scheduler.rpcapi.SchedulerAPI.create_backup')
+    @mock.patch.object(api.API, '_get_available_backup_service_host',
+                       return_value='fake_host')
+    @mock.patch.object(quota.QUOTAS, 'rollback')
+    @mock.patch.object(quota.QUOTAS, 'reserve')
+    def test_create_backup_with_specified_az(
+            self, mock_reserve, mock_rollback, mock_get_service,
+            mock_create):
+
+        self.ctxt.user_id = 'fake_user'
+        self.ctxt.project_id = 'fake_project'
+        mock_reserve.return_value = 'fake_reservation'
+        mock_get_service.return_value = 'host_1'
+
+        volume_id = self._create_volume_db_entry(status='available',
+                                                 host='testhost#rbd',
+                                                 size=1)
+        backup = self.api.create(self.ctxt,
+                                 name='test',
+                                 description='test',
+                                 volume_id=volume_id,
+                                 container='test',
+                                 availability_zone='test_az')
+        self.assertEqual('test_az', backup.availability_zone)
+
+    def test_create_backup_set_az_if_empty(self):
+        '''Test populating the availability_zone field if it was empty'''
+        vol_size = 1
+        vol_id = self._create_volume_db_entry(size=vol_size)
+        backup = self._create_backup_db_entry(volume_id=vol_id,
+                                              parent_id='mock',
+                                              availability_zone=None)
+        with mock.patch.object(self.backup_mgr, '_start_backup') as \
+                mock__start_backup:
+
+            self.backup_mgr.az = 'test_az'
+            self.backup_mgr.create_backup(self.ctxt, backup)
+
+            mock__start_backup.assert_called_once()
+
+        backup = db.backup_get(self.ctxt, backup.id)
+        self.assertEqual('test_az', backup.availability_zone)
+
+    def test_create_backup_set_az_if_provided(self):
+        '''Test backup availability_zone field remains populated'''
+        vol_size = 1
+        vol_id = self._create_volume_db_entry(size=vol_size)
+        backup = self._create_backup_db_entry(volume_id=vol_id,
+                                              parent_id='mock',
+                                              availability_zone='backup_az')
+        with mock.patch.object(self.backup_mgr, '_start_backup') as \
+                mock__start_backup:
+
+            self.backup_mgr.az = 'test_az'
+            self.backup_mgr.create_backup(self.ctxt, backup)
+
+            mock__start_backup.assert_called_once()
+
+        backup = db.backup_get(self.ctxt, backup.id)
+        self.assertEqual('backup_az', backup.availability_zone)

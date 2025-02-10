@@ -16,8 +16,6 @@
 
 """Implementation of an image service that uses Glance as the backend"""
 
-from __future__ import annotations  # Remove when only supporting python 3.9+
-
 import copy
 import itertools
 import random
@@ -25,7 +23,7 @@ import shutil
 import sys
 import textwrap
 import time
-from typing import (Any, Callable, Iterable, NoReturn, Optional)  # noqa: H301
+from typing import (Any, Callable, Iterable, NoReturn, Optional)
 import urllib
 import urllib.parse
 
