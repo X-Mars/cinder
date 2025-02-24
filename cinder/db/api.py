@@ -294,12 +294,12 @@ def service_create(context, values):
     return IMPL.service_create(context, values)
 
 
-def service_update(context, service_id, values):
+def service_update(context, service_id, values, retry=True):
     """Set the given properties on an service and update it.
 
     Raises NotFound if service does not exist.
     """
-    return IMPL.service_update(context, service_id, values)
+    return IMPL.service_update(context, service_id, values, retry)
 
 
 def service_get_by_uuid(context, service_uuid):
@@ -458,6 +458,11 @@ def calculate_resource_count(context, resource_type, filters):
 def volume_get_all_by_host(context, host, filters=None):
     """Get all volumes belonging to a host."""
     return IMPL.volume_get_all_by_host(context, host, filters=filters)
+
+
+def volume_update_all_by_service(context):
+    """Update all volumes associated with an old service."""
+    return IMPL.volume_update_all_by_service(context)
 
 
 def volume_get_all_by_group(context, group_id, filters=None):
@@ -1978,17 +1983,11 @@ def attachment_specs_update_or_create(context,
 ###################
 
 
-# TODO: (Y Release) remove method and this comment
-def volume_use_quota_online_data_migration(context, max_count):
-    return IMPL.volume_use_quota_online_data_migration(context, max_count)
+# TODO: (D Release) remove method and this comment
+def remove_temporary_admin_metadata_data_migration(context, max_count):
+    return IMPL.remove_temporary_admin_metadata_data_migration(
+        context, max_count)
 
 
-# TODO: (Y Release) remove method and this comment
-def snapshot_use_quota_online_data_migration(context, max_count):
-    return IMPL.snapshot_use_quota_online_data_migration(context, max_count)
-
-
-# TODO: (Z Release) remove method and this comment
-# TODO: (Y Release) uncomment method
-# def remove_temporary_admin_metadata_data_migration(context, max_count):
-#     IMPL.remove_temporary_admin_metadata_data_migration(context, max_count)
+def get_projects(context, model, read_deleted="no"):
+    return IMPL.get_projects(context, model, read_deleted=read_deleted)

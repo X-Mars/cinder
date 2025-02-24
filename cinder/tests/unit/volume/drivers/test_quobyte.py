@@ -27,7 +27,6 @@ from oslo_concurrency import processutils as putils
 from oslo_utils import fileutils
 from oslo_utils import imageutils
 from oslo_utils import units
-import psutil
 
 from cinder import context
 from cinder import db
@@ -273,7 +272,8 @@ class QuobyteDriverTestCase(test.TestCase):
 
         mock_qemu_img_info.assert_called_with(mock.sentinel.image_path,
                                               force_share=True,
-                                              run_as_root=True)
+                                              run_as_root=True,
+                                              allow_qcow2_backing_file=True)
 
     @ddt.data(['/other_random_path', '/mnt'],
               ['/other_basedir/' + TEST_MNT_HASH + '/volume-' + VOLUME_UUID,
@@ -439,14 +439,15 @@ class QuobyteDriverTestCase(test.TestCase):
                                           any_order=False)
             mock_validate.assert_called_once_with(self.TEST_MNT_POINT)
 
-    @mock.patch.object(psutil, "disk_partitions")
+    @mock.patch.object(quobyte, 'psutil')
     def test_mount_quobyte_should_reraise_already_mounted_error(self,
-                                                                part_mock):
+                                                                ps_mock):
         """test_mount_quobyte_should_reraise_already_mounted_error
 
         Like test_mount_quobyte_should_suppress_already_mounted_error
         but with ensure=False.
         """
+        part_mock = ps_mock.disk_partitions
         part_mock.return_value = []  # no quobyte@ devices
         with mock.patch.object(self._driver, '_execute') as mock_execute, \
                 mock.patch('oslo_utils.fileutils.ensure_tree') as mock_mkdir, \
@@ -623,7 +624,17 @@ class QuobyteDriverTestCase(test.TestCase):
         qb_snso_mock.assert_called_once_with(is_new_cinder_install=mock.ANY)
         self.assertFalse(drv.configuration.quobyte_overlay_volumes)
 
-    def test_check_for_setup_error_throws_quobyte_volume_url_not_set(self):
+    @mock.patch.object(quobyte, 'psutil', new=None)
+    def test_check_for_setup_error_throws_psutil_missing(self):
+        """check_for_setup_error raises if psutil not installed."""
+        drv = self._driver
+        e = self.assertRaises(exception.VolumeDriverException,
+                              drv.check_for_setup_error)
+        self.assertIn("psutil", str(e))
+
+    @mock.patch.object(quobyte, 'psutil')
+    def test_check_for_setup_error_throws_quobyte_volume_url_not_set(
+            self, mock_psutil):
         """check_for_setup_error throws if 'quobyte_volume_url' is not set."""
         drv = self._driver
 
@@ -633,7 +644,9 @@ class QuobyteDriverTestCase(test.TestCase):
                                            'no Quobyte volume configured',
                                            drv.check_for_setup_error)
 
-    def test_check_for_setup_error_throws_client_not_installed(self):
+    @mock.patch.object(quobyte, 'psutil')
+    def test_check_for_setup_error_throws_client_not_installed(
+            self, mock_psutil):
         """check_for_setup_error throws if client is not installed."""
         drv = self._driver
         drv._execute = mock.Mock(side_effect=OSError
@@ -646,7 +659,9 @@ class QuobyteDriverTestCase(test.TestCase):
                                              check_exit_code=False,
                                              run_as_root=False)
 
-    def test_check_for_setup_error_throws_client_not_executable(self):
+    @mock.patch.object(quobyte, 'psutil')
+    def test_check_for_setup_error_throws_client_not_executable(
+            self, mock_psutil):
         """check_for_setup_error throws if client cannot be executed."""
         drv = self._driver
 
@@ -961,10 +976,11 @@ class QuobyteDriverTestCase(test.TestCase):
         else:
             drv.extend_volume(volume, 3)
 
-            image_utils.qemu_img_info.assert_called_once_with(volume_path,
-                                                              force_share=True,
-                                                              run_as_root=False
-                                                              )
+            image_utils.qemu_img_info.assert_called_once_with(
+                volume_path,
+                force_share=True,
+                run_as_root=False,
+                allow_qcow2_backing_file=True)
             image_utils.resize_image.assert_called_once_with(volume_path, 3)
 
     def test_copy_volume_from_snapshot(self):
@@ -1008,9 +1024,11 @@ class QuobyteDriverTestCase(test.TestCase):
         drv._copy_volume_from_snapshot(snapshot, dest_volume, size)
 
         drv._read_info_file.assert_called_once_with(info_path)
-        image_utils.qemu_img_info.assert_called_once_with(snap_path,
-                                                          force_share=True,
-                                                          run_as_root=False)
+        image_utils.qemu_img_info.assert_called_once_with(
+            snap_path,
+            force_share=True,
+            run_as_root=False,
+            allow_qcow2_backing_file=True)
         (mock_convert.
          assert_called_once_with(src_vol_path,
                                  dest_vol_path,
@@ -1066,9 +1084,11 @@ class QuobyteDriverTestCase(test.TestCase):
         drv._copy_volume_from_snapshot(snapshot, dest_volume, size)
 
         drv._read_info_file.assert_called_once_with(info_path)
-        image_utils.qemu_img_info.assert_called_once_with(snap_path,
-                                                          force_share=True,
-                                                          run_as_root=False)
+        image_utils.qemu_img_info.assert_called_once_with(
+            snap_path,
+            force_share=True,
+            run_as_root=False,
+            allow_qcow2_backing_file=True)
         self.assertFalse(mock_convert.called,
                          ("_convert_image was called but should not have been")
                          )
@@ -1130,9 +1150,11 @@ class QuobyteDriverTestCase(test.TestCase):
         drv._read_info_file.assert_called_once_with(info_path)
         os_ac_mock.assert_called_once_with(
             drv._local_volume_from_snap_cache_path(snapshot), os.F_OK)
-        image_utils.qemu_img_info.assert_called_once_with(snap_path,
-                                                          force_share=True,
-                                                          run_as_root=False)
+        image_utils.qemu_img_info.assert_called_once_with(
+            snap_path,
+            force_share=True,
+            run_as_root=False,
+            allow_qcow2_backing_file=True)
         (mock_convert.
          assert_called_once_with(
              src_vol_path,
@@ -1193,9 +1215,11 @@ class QuobyteDriverTestCase(test.TestCase):
         drv._copy_volume_from_snapshot(snapshot, dest_volume, size)
 
         drv._read_info_file.assert_called_once_with(info_path)
-        image_utils.qemu_img_info.assert_called_once_with(snap_path,
-                                                          force_share=True,
-                                                          run_as_root=False)
+        image_utils.qemu_img_info.assert_called_once_with(
+            snap_path,
+            force_share=True,
+            run_as_root=False,
+            allow_qcow2_backing_file=True)
         (mock_convert.
          assert_called_once_with(
              src_vol_path,
@@ -1264,9 +1288,11 @@ class QuobyteDriverTestCase(test.TestCase):
         conn_info = drv.initialize_connection(volume, None)
 
         drv.get_active_image_from_info.assert_called_once_with(volume)
-        image_utils.qemu_img_info.assert_called_once_with(vol_path,
-                                                          force_share=True,
-                                                          run_as_root=False)
+        image_utils.qemu_img_info.assert_called_once_with(
+            vol_path,
+            force_share=True,
+            run_as_root=False,
+            allow_qcow2_backing_file=True)
 
         self.assertEqual('raw', conn_info['data']['format'])
         self.assertEqual('quobyte', conn_info['driver_volume_type'])
@@ -1315,13 +1341,15 @@ class QuobyteDriverTestCase(test.TestCase):
 
             mock_get_active_image_from_info.assert_called_once_with(volume)
             mock_local_volume_dir.assert_called_once_with(volume)
-            mock_qemu_img_info.assert_called_once_with(volume_path,
-                                                       force_share=True,
-                                                       run_as_root=False)
+            mock_qemu_img_info.assert_called_once_with(
+                volume_path,
+                force_share=True,
+                run_as_root=False,
+                allow_qcow2_backing_file=True)
             mock_upload_volume.assert_called_once_with(
                 mock.ANY, mock.ANY, mock.ANY, upload_path, run_as_root=False,
                 store_id=None, base_image_ref=None, compress=True,
-                volume_format='raw')
+                volume_format='raw', volume_fd=None)
             self.assertTrue(mock_create_temporary_file.called)
 
     @mock.patch('cinder.db.volume_glance_metadata_get', return_value={})
@@ -1368,15 +1396,17 @@ class QuobyteDriverTestCase(test.TestCase):
 
             mock_get_active_image_from_info.assert_called_once_with(volume)
             mock_local_volume_dir.assert_called_with(volume)
-            mock_qemu_img_info.assert_called_once_with(volume_path,
-                                                       force_share=True,
-                                                       run_as_root=False)
+            mock_qemu_img_info.assert_called_once_with(
+                volume_path,
+                force_share=True,
+                run_as_root=False,
+                allow_qcow2_backing_file=True)
             mock_convert_image.assert_called_once_with(
                 volume_path, upload_path, 'raw', run_as_root=False)
             mock_upload_volume.assert_called_once_with(
                 mock.ANY, mock.ANY, mock.ANY, upload_path, run_as_root=False,
                 store_id=None, base_image_ref=None, compress=True,
-                volume_format='raw')
+                volume_format='raw', volume_fd=None)
             self.assertTrue(mock_create_temporary_file.called)
 
     @mock.patch('cinder.db.volume_glance_metadata_get', return_value={})
@@ -1425,13 +1455,16 @@ class QuobyteDriverTestCase(test.TestCase):
 
             mock_get_active_image_from_info.assert_called_once_with(volume)
             mock_local_volume_dir.assert_called_with(volume)
-            mock_qemu_img_info.assert_called_once_with(volume_path,
-                                                       force_share=True,
-                                                       run_as_root=False)
+            mock_qemu_img_info.assert_called_once_with(
+                volume_path,
+                force_share=True,
+                run_as_root=False,
+                allow_qcow2_backing_file=True)
             mock_convert_image.assert_called_once_with(
                 volume_path, upload_path, 'raw', run_as_root=False)
             mock_upload_volume.assert_called_once_with(
-                mock.ANY, mock.ANY, mock.ANY, upload_path, run_as_root=False,
+                mock.ANY, mock.ANY, mock.ANY, upload_path, volume_fd=None,
+                run_as_root=False,
                 store_id=None, base_image_ref=None, compress=True,
                 volume_format='raw')
             self.assertTrue(mock_create_temporary_file.called)
@@ -1469,9 +1502,10 @@ class QuobyteDriverTestCase(test.TestCase):
                          drv.configuration.nas_secure_file_permissions)
         self.assertFalse(drv._execute_as_root)
 
-    @mock.patch.object(psutil, "disk_partitions")
+    @mock.patch.object(quobyte, 'psutil')
     @mock.patch.object(os, "stat")
-    def test_validate_volume_all_good_prefix_val(self, stat_mock, part_mock):
+    def test_validate_volume_all_good_prefix_val(self, stat_mock, ps_mock):
+        part_mock = ps_mock.disk_partitions
         part_mock.return_value = self.get_mock_partitions()
         drv = self._driver
 
@@ -1488,9 +1522,10 @@ class QuobyteDriverTestCase(test.TestCase):
         stat_mock.assert_called_once_with(self.TEST_MNT_POINT)
         part_mock.assert_called_once_with(all=True)
 
-    @mock.patch.object(psutil, "disk_partitions")
+    @mock.patch.object(quobyte, 'psutil')
     @mock.patch.object(os, "stat")
-    def test_validate_volume_all_good_subtype_val(self, stat_mock, part_mock):
+    def test_validate_volume_all_good_subtype_val(self, stat_mock, ps_mock):
+        part_mock = ps_mock.disk_partitions
         part_mock.return_value = self.get_mock_partitions()
         part_mock.return_value[0].device = "not_quobyte"
         part_mock.return_value[0].fstype = "fuse.quobyte"
@@ -1509,9 +1544,10 @@ class QuobyteDriverTestCase(test.TestCase):
         stat_mock.assert_called_once_with(self.TEST_MNT_POINT)
         part_mock.assert_called_once_with(all=True)
 
-    @mock.patch.object(psutil, "disk_partitions")
+    @mock.patch.object(quobyte, 'psutil')
     @mock.patch.object(os, "stat")
-    def test_validate_volume_mount_not_working(self, stat_mock, part_mock):
+    def test_validate_volume_mount_not_working(self, stat_mock, ps_mock):
+        part_mock = ps_mock.disk_partitions
         part_mock.return_value = self.get_mock_partitions()
         drv = self._driver
 
@@ -1527,8 +1563,9 @@ class QuobyteDriverTestCase(test.TestCase):
         stat_mock.assert_called_once_with(self.TEST_MNT_POINT)
         part_mock.assert_called_once_with(all=True)
 
-    @mock.patch.object(psutil, "disk_partitions")
-    def test_validate_volume_no_mtab_entry(self, part_mock):
+    @mock.patch.object(quobyte, 'psutil')
+    def test_validate_volume_no_mtab_entry(self, ps_mock):
+        part_mock = ps_mock.disk_partitions
         part_mock.return_value = []  # no quobyte@ devices
         msg = ("Volume driver reported an error: "
                "No matching Quobyte mount entry for %(mpt)s"
@@ -1541,8 +1578,9 @@ class QuobyteDriverTestCase(test.TestCase):
             self._driver._validate_volume,
             self.TEST_MNT_POINT)
 
-    @mock.patch.object(psutil, "disk_partitions")
-    def test_validate_volume_wrong_mount_type(self, part_mock):
+    @mock.patch.object(quobyte, 'psutil')
+    def test_validate_volume_wrong_mount_type(self, ps_mock):
+        part_mock = ps_mock.disk_partitions
         mypart = mock.Mock()
         mypart.device = "not-quobyte"
         mypart.mountpoint = self.TEST_MNT_POINT
@@ -1560,8 +1598,9 @@ class QuobyteDriverTestCase(test.TestCase):
             self.TEST_MNT_POINT)
         part_mock.assert_called_once_with(all=True)
 
-    @mock.patch.object(psutil, "disk_partitions")
-    def test_validate_volume_stale_mount(self, part_mock):
+    @mock.patch.object(quobyte, 'psutil')
+    def test_validate_volume_stale_mount(self, ps_mock):
+        part_mock = ps_mock.disk_partitions
         part_mock.return_value = self.get_mock_partitions()
         drv = self._driver
 

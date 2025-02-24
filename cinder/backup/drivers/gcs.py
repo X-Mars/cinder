@@ -31,23 +31,11 @@ import io
 import os
 
 try:
-    # For python 3.8 and later
-    import importlib.metadata as importlib_metadata
-except ImportError:
-    # For everyone else
-    import importlib_metadata
-
-try:
     from google.auth import exceptions as gexceptions
     from google.oauth2 import service_account
     import google_auth_httplib2
 except ImportError:
     service_account = google_auth_httplib2 = gexceptions = None
-
-try:
-    from oauth2client import client
-except ImportError:
-    client = None
 
 from googleapiclient import discovery
 from googleapiclient import errors
@@ -56,7 +44,6 @@ from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import secretutils
 from oslo_utils import timeutils
-from packaging import version
 
 from cinder.backup import chunkeddriver
 from cinder import exception
@@ -148,17 +135,6 @@ def gcs_logger(func):
     return func_wrapper
 
 
-def _get_dist_version(name):
-    """Mock-able wrapper for importlib_metadata.version()
-
-    The module name where version() is found varies by python
-    version. This function makes it easier for tests to mock the
-    function and change the return value.
-
-    """
-    return importlib_metadata.version(name)
-
-
 @interface.backupdriver
 class GoogleBackupDriver(chunkeddriver.ChunkedBackupDriver):
     """Provides backup, restore and delete of backup objects within GCS."""
@@ -190,22 +166,20 @@ class GoogleBackupDriver(chunkeddriver.ChunkedBackupDriver):
             os.environ['http_proxy'] = CONF.backup_gcs_proxy_url
 
         backup_credential = CONF.backup_gcs_credential_file
-        # If we have google client that support google-auth library
-        # (v1.6.0 or higher) and all required libraries are installed use
-        # google-auth for the credentials
-        dist_version = _get_dist_version('google-api-python-client')
-        if (version.parse(dist_version) >= version.parse('1.6.0')
-                and service_account):
+        # service_account is imported if all required libraries are available
+        if service_account:
             creds = service_account.Credentials.from_service_account_file(
                 backup_credential)
             OAUTH_EXCEPTIONS = (gexceptions.RefreshError,
-                                gexceptions.DefaultCredentialsError,
-                                client.Error)
-
-        # Can't use google-auth, use deprecated oauth2client
+                                gexceptions.DefaultCredentialsError)
         else:
-            creds = client.GoogleCredentials.from_stream(backup_credential)
-            OAUTH_EXCEPTIONS = client.Error
+            # NOTE(tkajinam): google-api-python-client is now in requirements
+            #                 and google-auth-httplib2 is its dependency. So
+            #                 this error should not be raised now. But it's
+            #                 kept now in case the client library is moved to
+            #                 extra dependencies
+            msg = _('google-api-python-client not found')
+            raise exception.BackupDriverException(reason=msg)
 
         self.conn = discovery.build('storage',
                                     'v1',

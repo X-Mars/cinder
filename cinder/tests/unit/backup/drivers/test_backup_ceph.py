@@ -157,6 +157,10 @@ class BackupCephTestCase(test.TestCase):
                 self.callstack.append('communicate')
                 return retval
 
+            def wait(mock_inst):
+                self.callstack.append('wait')
+                return retval
+
         subprocess.Popen.side_effect = MockPopen
 
     def setUp(self):
@@ -522,7 +526,8 @@ class BackupCephTestCase(test.TestCase):
                                               'popen_init',
                                               'write',
                                               'stdout_close',
-                                              'communicate'], self.callstack)
+                                              'communicate',
+                                              'wait'], self.callstack)
 
                             self.assertFalse(mock_full_backup.called)
                             self.assertFalse(mock_get_backup_snaps.called)
@@ -530,6 +535,40 @@ class BackupCephTestCase(test.TestCase):
                             # Ensure the files are equal
                             self.assertEqual(checksum.digest(),
                                              self.checksum.digest())
+
+    @common_mocks
+    def test_backup_snapshot_lifecycle(self):
+        with mock.patch.object(self.service, '_rbd_diff_transfer'), \
+            mock.patch.object(self.service, "get_backup_snaps") \
+                as mock_get_backup_snaps:
+
+            CONF.set_override('backup_ceph_max_snapshots', 1)
+
+            mocked_snaps = [
+                {'name': 'backup.mock.snap.153464362.12'},
+                {'name': 'backup.mock.snap.225341241.90'},
+                {'name': 'backup.mock.snap.399994362.10'}]
+
+            mock_get_backup_snaps.return_value = mocked_snaps
+            self.mock_rbd.RBD.remove_snap = mock.Mock()
+
+            image = self.service.rbd.Image()
+            meta = linuxrbd.RBDImageMetadata(image,
+                                             'pool_foo',
+                                             'user_foo',
+                                             'conf_foo')
+            rbdio = linuxrbd.RBDVolumeIOWrapper(meta)
+            rbdio.seek(0)
+
+            self.service._backup_rbd(self.backup, rbdio,
+                                     self.volume.name, self.volume.size)
+
+            self.assertEqual(2, self.mock_rbd.Image.return_value.
+                             remove_snap.call_count)
+            expected_calls = [mock.call('backup.mock.snap.153464362.12'),
+                              mock.call('backup.mock.snap.225341241.90')]
+            self.mock_rbd.Image.return_value.remove_snap.\
+                assert_has_calls(expected_calls)
 
     @common_mocks
     def test_backup_volume_from_rbd_set_parent_id(self):
@@ -934,6 +973,96 @@ class BackupCephTestCase(test.TestCase):
         self.assertNotEqual(threading.current_thread(), thread_dict['thread'])
 
     @common_mocks
+    def test_full_restore_without_snapshot_id_nor_src_snap(self):
+        length = 1024
+        volume_is_new = True
+        src_snap = ''
+        with tempfile.NamedTemporaryFile() as dest_file:
+            with mock.patch.object(self.service,
+                                   '_transfer_data') as mock_transfer_data, \
+                mock.patch.object(self.service,
+                                  '_get_backup_base_name') as mock_getbasename:
+
+                self.service._full_restore(self.backup, dest_file, length,
+                                           volume_is_new, src_snap)
+
+                mock_getbasename.assert_called_once_with(self.volume_id,
+                                                         backup=self.backup)
+                mock_transfer_data.assert_called_once()
+
+    @common_mocks
+    def test_full_restore_without_snapshot_id_w_src_snap(self):
+        length = 1024
+        volume_is_new = True
+        src_snap = 'random_snap'
+        with tempfile.NamedTemporaryFile() as dest_file:
+            with mock.patch.object(self.service,
+                                   '_transfer_data') as mock_transfer_data, \
+                mock.patch.object(self.service,
+                                  '_get_backup_base_name') as mock_getbasename:
+
+                self.service._full_restore(self.backup, dest_file, length,
+                                           volume_is_new, src_snap)
+
+                mock_getbasename.assert_called_once_with(self.volume_id,
+                                                         backup=self.backup)
+                mock_transfer_data.assert_called_once()
+
+    @common_mocks
+    def test_full_restore_with_snapshot_id(self):
+        length = 1024
+        volume_is_new = True
+        src_snap = ''
+
+        # Create alternate backup with snapshot_id
+        backup_id = fake.BACKUP4_ID
+        self._create_backup_db_entry(backup_id, self.volume_id,
+                                     self.volume_size)
+
+        backup = objects.Backup.get_by_id(self.ctxt, backup_id)
+        backup.snapshot_id = 'random_snap_id'
+        backup.container = "backups"
+        backup.parent = self.backup
+        backup.parent.service_metadata = '{"base": "random"}'
+
+        with tempfile.NamedTemporaryFile() as dest_file:
+            with mock.patch.object(self.service,
+                                   '_transfer_data') as mock_transfer_data, \
+                mock.patch.object(self.service,
+                                  '_get_backup_base_name') as mock_getbasename:
+
+                self.service._full_restore(backup, dest_file, length,
+                                           volume_is_new, src_snap)
+
+                mock_getbasename.assert_called_once_with(self.volume_id)
+                mock_transfer_data.assert_called_once()
+
+    @common_mocks
+    def test_full_restore_with_image_not_found(self):
+        length = 1024
+        volume_is_new = True
+        src_snap = None
+        with tempfile.NamedTemporaryFile() as dest_file:
+            with mock.patch.object(self.service,
+                                   '_get_backup_base_name') as mock_name, \
+                    mock.patch('eventlet.tpool.Proxy') as mock_proxy:
+
+                self.mock_rbd.Image.side_effect = self.mock_rbd.ImageNotFound
+
+                self.assertRaises(self.mock_rbd.ImageNotFound,
+                                  self.service._full_restore,
+                                  self.backup,
+                                  dest_file,
+                                  length,
+                                  volume_is_new,
+                                  src_snap)
+
+                # Check that the _get_backup_base_name was called
+                # twice due to the exception
+                self.assertEqual(mock_name.call_count, 2)
+                self.assertEqual(mock_proxy.call_count, 2)
+
+    @common_mocks
     def test_discard_bytes(self):
         # Lower the chunksize to a memory manageable number
         thread_dict = {}
@@ -980,7 +1109,7 @@ class BackupCephTestCase(test.TestCase):
             self.assertEqual(2, image.write.call_count)
             self.assertEqual(2, image.flush.call_count)
             self.assertFalse(image.discard.called)
-            zeroes = '\0' * self.service.chunk_size
+            zeroes = bytearray(self.service.chunk_size)
             image.write.assert_has_calls([mock.call(zeroes, 0),
                                          mock.call(zeroes, self.chunk_size)])
             self.assertNotEqual(threading.current_thread(),
@@ -1004,7 +1133,7 @@ class BackupCephTestCase(test.TestCase):
                                                     self.chunk_size * 2),
                                           mock.call(zeroes,
                                                     self.chunk_size * 3),
-                                          mock.call('\0',
+                                          mock.call(bytearray(1),
                                                     self.chunk_size * 4)])
 
     @common_mocks
@@ -1322,8 +1451,8 @@ class BackupCephTestCase(test.TestCase):
         mock_fcntl.return_value = 0
         self._setup_mock_popen(['out', 'err'])
         self.service._piped_execute(['foo'], ['bar'])
-        self.assertEqual(['popen_init', 'popen_init',
-                          'stdout_close', 'communicate'], self.callstack)
+        self.assertEqual(['popen_init', 'popen_init', 'stdout_close',
+                          'communicate', 'wait'], self.callstack)
 
     @common_mocks
     def test_restore_metdata(self):

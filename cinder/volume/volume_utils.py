@@ -14,8 +14,6 @@
 
 """Volume-related Utilities and helpers."""
 
-from __future__ import annotations  # Remove when only supporting python 3.9+
-
 import abc
 import ast
 import functools
@@ -33,8 +31,8 @@ import tempfile
 import time
 import types
 import typing
-from typing import Any, BinaryIO, Callable, IO  # noqa: H301
-from typing import Optional, Union  # noqa: H301
+from typing import Any, BinaryIO, Callable, IO
+from typing import Optional, Union
 import uuid
 
 from castellan.common.credentials import keystone_password
@@ -886,7 +884,6 @@ def paginate_entries_list(entries: list[dict],
                  for (key, multiplier) in zip(sort_keys, sort_dirs)]
 
     def comparer(left, right) -> int:
-        fn: Callable
         for fn, d in comparers:
             left_val = fn(left)
             right_val = fn(right)
@@ -996,6 +993,7 @@ def delete_encryption_key(context: context.RequestContext,
                  "cinder's service context.", encryption_key_id)
         conf = CONF
         ks_loading.register_auth_conf_options(conf, 'keystone_authtoken')
+        ks_loading.load_auth_from_conf_options(conf, 'keystone_authtoken')
         service_context = keystone_password.KeystonePassword(
             password=conf.keystone_authtoken.password,
             auth_url=conf.keystone_authtoken.auth_url,
@@ -1184,7 +1182,8 @@ def copy_image_to_volume(driver,
                          volume: 'objects.Volume',
                          image_meta: dict,
                          image_location: Union[str, tuple[Optional[str], Any]],
-                         image_service) -> None:
+                         image_service,
+                         disable_sparse: bool = False) -> None:
     """Downloads Glance image to the specified volume."""
     image_id = image_meta['id']
     LOG.debug("Attempting download of %(image_id)s (%(image_location)s)"
@@ -1199,15 +1198,18 @@ def copy_image_to_volume(driver,
             # already cloned it to the volume's key in
             # _get_encryption_key_id, so we can do a direct copy.
             driver.copy_image_to_volume(
-                context, volume, image_service, image_id)
+                context, volume, image_service, image_id,
+                disable_sparse=disable_sparse)
         elif volume.encryption_key_id:
             # Creating an encrypted volume from a normal, unencrypted,
             # image.
             driver.copy_image_to_encrypted_volume(
-                context, volume, image_service, image_id)
+                context, volume, image_service, image_id,
+                disable_sparse=disable_sparse)
         else:
             driver.copy_image_to_volume(
-                context, volume, image_service, image_id)
+                context, volume, image_service, image_id,
+                disable_sparse=disable_sparse)
     except processutils.ProcessExecutionError as ex:
         LOG.exception("Failed to copy image %(image_id)s to volume: "
                       "%(volume_id)s",
@@ -1310,7 +1312,7 @@ def resolve_hostname(hostname: str) -> str:
     ip = socket.getaddrinfo(hostname, None)[0][4][0]
     LOG.debug('Asked to resolve hostname %(host)s and got IP %(ip)s.',
               {'host': hostname, 'ip': ip})
-    return ip
+    return str(ip)
 
 
 def update_backup_error(backup,
@@ -1337,7 +1339,8 @@ def upload_volume(context: context.RequestContext,
                   volume: 'objects.Volume',
                   volume_format: str = 'raw',
                   run_as_root: bool = True,
-                  compress: bool = True) -> None:
+                  compress: bool = True,
+                  volume_fd = None) -> None:
     # retrieve store information from extra-specs
     store_id = volume.volume_type.extra_specs.get('image_service:store_id')
 
@@ -1350,7 +1353,8 @@ def upload_volume(context: context.RequestContext,
                               volume_format=volume_format,
                               run_as_root=run_as_root,
                               compress=compress, store_id=store_id,
-                              base_image_ref=base_image_ref)
+                              base_image_ref=base_image_ref,
+                              volume_fd=volume_fd)
 
 
 def get_backend_configuration(backend_name, backend_opts=None):

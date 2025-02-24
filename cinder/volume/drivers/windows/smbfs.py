@@ -89,6 +89,8 @@ class WindowsSmbfsDriver(remotefs_drv.RevertToSnapshotMixin,
     # ThirdPartySystems wiki page
     CI_WIKI_NAME = "Cloudbase_Cinder_SMB3_CI"
 
+    SUPPORTED = False
+
     _MINIMUM_QEMU_IMG_VERSION = '1.6'
 
     _SUPPORTED_IMAGE_FORMATS = [_DISK_FORMAT_VHD,
@@ -484,7 +486,7 @@ class WindowsSmbfsDriver(remotefs_drv.RevertToSnapshotMixin,
             self._delete(merged_img_path)
 
             # TODO(lpetrut): drop snapshot info file usage.
-            del(snap_info[snapshot.id])
+            del (snap_info[snapshot.id])
             self._write_info_file(info_path, snap_info)
 
         if not isinstance(snapshot, objects.Snapshot):
@@ -582,7 +584,8 @@ class WindowsSmbfsDriver(remotefs_drv.RevertToSnapshotMixin,
             if temp_path:
                 self._delete(temp_path)
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id,
+                             disable_sparse=False):
         """Fetch the image from image_service and write it to the volume."""
         volume_path = self.local_path(volume)
         volume_format = self.get_volume_format(volume, qemu_format=True)
@@ -593,7 +596,8 @@ class WindowsSmbfsDriver(remotefs_drv.RevertToSnapshotMixin,
             context, image_service, image_id,
             volume_path, volume_format,
             self.configuration.volume_dd_blocksize,
-            volume_subformat)
+            volume_subformat,
+            disable_sparse=disable_sparse)
 
         volume_path = self.local_path(volume)
         self._vhdutils.set_vhd_guid(volume_path, volume.id)

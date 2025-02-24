@@ -20,7 +20,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: cinder VERSION\n"
 "Report-Msgid-Bugs-To: https://bugs.launchpad.net/openstack-i18n/\n"
-"POT-Creation-Date: 2022-11-16 14:04+0000\n"
+"POT-Creation-Date: 2024-09-04 23:51+0000\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
@@ -2562,14 +2562,6 @@ msgstr ""
 "映像虚拟大小为 %(image_size)dGB，在大小为 %(volume_size)dGB 的卷中将无法容"
 "纳。"
 
-msgid ""
-"ImageBusy error raised while deleting rbd volume. This may have been caused "
-"by a connection from a client that has crashed and, if so, may be resolved "
-"by retrying the delete after 30 seconds has elapsed."
-msgstr ""
-"删除 rbd 卷时，发生 ImageBusy 错误。这可能是由于客户机的已崩溃连接导致，如果"
-"是这样，那么可通过在 30 秒之后重试该删除来解决问题。"
-
 msgid "Incremental backups exist for this backup."
 msgstr "对于此备份，存在增量备份。"
 
@@ -3059,11 +3051,6 @@ msgstr "由于版本不兼容，元数据复原失败。"
 msgid "Method %(method)s is not defined"
 msgstr "方法 %(method)s 未被定义"
 
-msgid ""
-"Missing 'purestorage' python module, ensure the library is installed and "
-"available."
-msgstr "缺少“purestorage”python 模块，请确保库已安装并且可用。"
-
 msgid "Missing Fibre Channel SAN configuration param - fc_fabric_names"
 msgstr "缺少光纤通道 SAN 配置参数 - fc_fabric_names"
 
@@ -3293,9 +3280,6 @@ msgstr "集群 %(current)s 中不存在卷或者一致性组。"
 msgid "Not a valid value for NaElement."
 msgstr "此值对 NaElement 无效。"
 
-msgid "Not an rbd snapshot"
-msgstr "不是 rbd 快照"
-
 #, python-format
 msgid "Not authorized for image %(image_id)s."
 msgstr "未针对映像 %(image_id)s 授权。"
@@ -3306,9 +3290,6 @@ msgstr "未授权。"
 #, python-format
 msgid "Not enough space on backend (%(backend)s)"
 msgstr "后端 (%(backend)s) 上没有足够的空间"
-
-msgid "Not stored in rbd"
-msgstr "未存储在 rbd 中"
 
 msgid "Nova returned \"error\" status while creating snapshot."
 msgstr "在创建快照时，Nova 返回了“错误”状态。"
@@ -4935,9 +4916,6 @@ msgstr ""
 "标准输出：%(out)s\n"
 "标准错误：%(err)s"
 
-msgid "_create_volume_name, id_code is None."
-msgstr "_create_volume_name，id_code 为 None。"
-
 msgid "_delete_copysession, Cannot find Replication Service"
 msgstr "_delete_copysession，找不到复制服务"
 
@@ -5025,14 +5003,6 @@ msgstr ""
 #, python-format
 msgid "_find_initiator_names, connector: %(connector)s, initiator not found."
 msgstr "_find_initiator_names，连接器：%(connector)s，找不到启动程序。"
-
-#, python-format
-msgid ""
-"_find_lun, volumename: %(volumename)s, EnumerateInstanceNames, cannot "
-"connect to ETERNUS."
-msgstr ""
-"_find_lun，volumename：%(volumename)s，EnumerateInstanceNames，无法连接至 "
-"ETERNUS。"
 
 #, python-format
 msgid ""
@@ -5359,30 +5329,11 @@ msgid "create_hypermetro_pair error."
 msgstr "create_hypermetro_pair 错误。"
 
 #, python-format
-msgid "create_snapshot, eternus_pool: %(eternus_pool)s, pool not found."
-msgstr "create_snapshot，eternus_pool：%(eternus_pool)s，找不到池。"
-
-#, python-format
-msgid ""
-"create_snapshot, snapshotname: %(snapshotname)s, source volume name: "
-"%(volumename)s, vol_instance.path: %(vol_instance)s, dest volume name: "
-"%(d_volumename)s, pool: %(pool)s, Return code: %(rc)lu, Error: %(errordesc)s."
-msgstr ""
-"create_snapshot，snapshotname：%(snapshotname)s，源卷名：%(volumename)s，"
-"vol_instance.path: %(vol_instance)s，目标卷名：%(d_volumename)s，池："
-"%(pool)s，返回码：%(rc)lu，错误：%(errordesc)s。"
-
-#, python-format
 msgid ""
 "create_snapshot, volumename: %(s_volumename)s, source volume not found on "
 "ETERNUS."
 msgstr ""
 "create_snapshot，volumename：%(s_volumename)s，在 ETERNUS 上找不到源卷。"
-
-#, python-format
-msgid ""
-"create_snapshot, volumename: %(volumename)s, Replication Service not found."
-msgstr "create_snapshot，volumename：%(volumename)s，找不到复制服务。"
 
 #, python-format
 msgid ""
@@ -5393,29 +5344,6 @@ msgstr ""
 
 msgid "create_snapshot: get source volume failed."
 msgstr "create_snapshot：获取源卷失败。"
-
-#, python-format
-msgid ""
-"create_volume, volume: %(volume)s, EnumerateInstances, cannot connect to "
-"ETERNUS."
-msgstr ""
-"create_volume，卷：%(volume)s，EnumerateInstances，无法连接至 ETERNUS。"
-
-#, python-format
-msgid ""
-"create_volume, volume: %(volume)s, volumename: %(volumename)s, eternus_pool: "
-"%(eternus_pool)s, Storage Configuration Service not found."
-msgstr ""
-"create_volume，卷：%(volume)s，卷名：%(volumename)s，eternus_pool："
-"%(eternus_pool)s，找不到存储器配置服务。"
-
-#, python-format
-msgid ""
-"create_volume, volumename: %(volumename)s, poolname: %(eternus_pool)s, "
-"Return code: %(rc)lu, Error: %(errordesc)s."
-msgstr ""
-"create_volume，volumename：%(volumename)s，poolname：%(eternus_pool)s，返回"
-"码：%(rc)lu，错误：%(errordesc)s。"
 
 msgid "create_volume_from_snapshot, Source Volume does not exist in ETERNUS."
 msgstr "create_volume_from_snapshot，源卷在 ETERNUS 中不存在。"
@@ -5470,10 +5398,6 @@ msgstr ""
 "的对象的 MD5 不同"
 
 #, python-format
-msgid "extend_volume, eternus_pool: %(eternus_pool)s, pool not found."
-msgstr "extend_volume，eternus_pool：%(eternus_pool)s，找不到池。"
-
-#, python-format
 msgid ""
 "extend_volume, volume: %(volume)s, volumename: %(volumename)s, eternus_pool: "
 "%(eternus_pool)s, Storage Configuration Service not found."
@@ -5488,10 +5412,6 @@ msgid ""
 msgstr ""
 "extend_volume，volumename：%(volumename)s，返回码：%(rc)lu，错误："
 "%(errordesc)s，池类型：%(pooltype)s。"
-
-#, python-format
-msgid "extend_volume, volumename: %(volumename)s, volume not found."
-msgstr "extend_volume，volumename：%(volumename)s，找不到卷。"
 
 msgid "fake"
 msgstr "fake"
@@ -5660,14 +5580,6 @@ msgid ""
 msgstr ""
 "此卷驱动程序需要 qemu-img %(minimum_version)s 或更高版本。当前 qemu-img 版"
 "本：%(current_version)s"
-
-#, python-format
-msgid ""
-"qemu-img is not installed and image is of type %s.  Only RAW images can be "
-"used if qemu-img is not installed."
-msgstr ""
-"qemu-img 未安装，并且映像的类型为 %s。仅当 qemu-img 未安装时，才能使用原始映"
-"像。"
 
 msgid ""
 "qemu-img is not installed and the disk format is not specified.  Only RAW "

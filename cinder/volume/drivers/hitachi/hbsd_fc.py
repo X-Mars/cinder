@@ -1,4 +1,4 @@
-# Copyright (C) 2020, 2023, Hitachi, Ltd.
+# Copyright (C) 2020, 2024, Hitachi, Ltd.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -80,6 +80,7 @@ class HBSDFCDriver(driver.FibreChannelDriver):
         2.3.3 - Add GAD volume support.
         2.3.4 - Support data deduplication and compression.
         2.3.5 - Fix key error when backend is down.
+        2.4.0 - Add QoS support.
 
     """
 
@@ -191,14 +192,15 @@ class HBSDFCDriver(driver.FibreChannelDriver):
             self, ctxt, volume, new_volume, original_volume_status):
         """Do any remaining jobs after migration."""
         self.common.discard_zero_page(new_volume)
-        super(HBSDFCDriver, self).update_migrated_volume(
-            ctxt, volume, new_volume, original_volume_status)
+        return self.common.update_migrated_volume(new_volume)
 
     @volume_utils.trace
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id,
+                             disable_sparse=False):
         """Fetch the image from image_service and write it to the volume."""
         super(HBSDFCDriver, self).copy_image_to_volume(
-            context, volume, image_service, image_id)
+            context, volume, image_service, image_id,
+            disable_sparse=disable_sparse)
         self.common.discard_zero_page(volume)
 
     @volume_utils.trace

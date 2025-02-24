@@ -1,4 +1,4 @@
-# Copyright (C) 2020, 2023, Hitachi, Ltd.
+# Copyright (C) 2020, 2024, Hitachi, Ltd.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -69,18 +69,20 @@ DEFAULT_CONNECTOR = {
 CTXT = cinder_context.get_admin_context()
 
 TEST_VOLUME = []
-for i in range(4):
+for i in range(5):
     volume = {}
     volume['id'] = '00000000-0000-0000-0000-{0:012d}'.format(i)
     volume['name'] = 'test-volume{0:d}'.format(i)
     volume['volume_type_id'] = '00000000-0000-0000-0000-{0:012d}'.format(i)
-    if i == 3:
+    if i == 3 or i == 4:
         volume['provider_location'] = None
     else:
         volume['provider_location'] = '{0:d}'.format(i)
     volume['size'] = 128
     if i == 2:
         volume['status'] = 'in-use'
+    elif i == 4:
+        volume['status'] = None
     else:
         volume['status'] = 'available'
     volume = fake_volume.fake_volume_obj(CTXT, **volume)
@@ -94,19 +96,23 @@ def _volume_get(context, volume_id):
 
 
 TEST_SNAPSHOT = []
-snapshot = {}
-snapshot['id'] = '10000000-0000-0000-0000-{0:012d}'.format(0)
-snapshot['name'] = 'TEST_SNAPSHOT{0:d}'.format(0)
-snapshot['provider_location'] = '{0:d}'.format(1)
-snapshot['status'] = 'available'
-snapshot['volume_id'] = '00000000-0000-0000-0000-{0:012d}'.format(0)
-snapshot['volume'] = _volume_get(None, snapshot['volume_id'])
-snapshot['volume_name'] = 'test-volume{0:d}'.format(0)
-snapshot['volume_size'] = 128
-snapshot = obj_snap.Snapshot._from_db_object(
-    CTXT, obj_snap.Snapshot(),
-    fake_snapshot.fake_db_snapshot(**snapshot))
-TEST_SNAPSHOT.append(snapshot)
+for i in range(2):
+    snapshot = {}
+    snapshot['id'] = '10000000-0000-0000-0000-{0:012d}'.format(i)
+    snapshot['name'] = 'TEST_SNAPSHOT{0:d}'.format(i)
+    snapshot['provider_location'] = '{0:d}'.format(i + 1)
+    snapshot['status'] = 'available'
+    snapshot['volume_id'] = '00000000-0000-0000-0000-{0:012d}'.format(i)
+    snapshot['volume'] = _volume_get(None, snapshot['volume_id'])
+    snapshot['volume_name'] = 'test-volume{0:d}'.format(i)
+    snapshot['volume_size'] = 128
+    if i == 1:
+        snapshot['volume_type_id'] =\
+            '00000000-0000-0000-0000-{0:012d}'.format(i)
+    snapshot = obj_snap.Snapshot._from_db_object(
+        CTXT, obj_snap.Snapshot(),
+        fake_snapshot.fake_db_snapshot(**snapshot))
+    TEST_SNAPSHOT.append(snapshot)
 
 TEST_GROUP = []
 for i in range(2):
@@ -194,6 +200,18 @@ GET_LDEV_RESULT = {
     "poolId": 30,
     "dataReductionStatus": "DISABLED",
     "dataReductionMode": "disabled",
+    "label": "00000000000000000000000000000000",
+}
+
+GET_LDEV_RESULT_SNAP = {
+    "emulationType": "OPEN-V-CVS",
+    "blockCapacity": 2097152,
+    "attributes": ["CVS", "HDP"],
+    "status": "NML",
+    "poolId": 30,
+    "dataReductionStatus": "DISABLED",
+    "dataReductionMode": "disabled",
+    "label": "10000000000000000000000000000000",
 }
 
 GET_LDEV_RESULT_MAPPED = {
@@ -216,6 +234,7 @@ GET_LDEV_RESULT_PAIR = {
     "blockCapacity": 2097152,
     "attributes": ["CVS", "HDP", "HTI"],
     "status": "NML",
+    "label": "10000000000000000000000000000000",
 }
 
 GET_POOLS_RESULT = {
@@ -495,8 +514,7 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
         self.assertEqual(1, brick_get_connector_properties.call_count)
         self.assertEqual(6, request.call_count)
         # stop the Loopingcall within the do_setup treatment
-        self.driver.common.client.keep_session_loop.stop()
-        self.driver.common.client.keep_session_loop.wait()
+        drv.common.client.keep_session_loop.stop()
 
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(
@@ -526,8 +544,7 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
         self.assertEqual(1, brick_get_connector_properties.call_count)
         self.assertEqual(9, request.call_count)
         # stop the Loopingcall within the do_setup treatment
-        self.driver.common.client.keep_session_loop.stop()
-        self.driver.common.client.keep_session_loop.wait()
+        drv.common.client.keep_session_loop.stop()
 
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(
@@ -557,8 +574,7 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
         self.assertEqual(1, brick_get_connector_properties.call_count)
         self.assertEqual(9, request.call_count)
         # stop the Loopingcall within the do_setup treatment
-        self.driver.common.client.keep_session_loop.stop()
-        self.driver.common.client.keep_session_loop.wait()
+        drv.common.client.keep_session_loop.stop()
 
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(
@@ -604,12 +620,17 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
         self.assertEqual(1, get_goodness_function.call_count)
 
     @mock.patch.object(requests.Session, "request")
-    def test_create_volume(self, request):
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_create_volume(self, get_volume_type_qos_specs,
+                           get_volume_type_extra_specs, request):
         request.return_value = FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)
+        get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         self.driver.common._stats = {}
         self.driver.common._stats['pools'] = [
             {'location_info': {'pool_id': 30}}]
-        ret = self.driver.create_volume(fake_volume.fake_volume_obj(self.ctxt))
+        ret = self.driver.create_volume(TEST_VOLUME[4])
         self.assertEqual('1', ret['provider_location'])
         self.assertEqual(2, request.call_count)
 
@@ -625,24 +646,57 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
     @mock.patch.object(sqlalchemy_api, 'volume_get', side_effect=_volume_get)
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
     def test_create_snapshot(
-            self, volume_get, get_volume_type_extra_specs, request):
+            self, get_volume_type_qos_specs, volume_get,
+            get_volume_type_extra_specs, request):
         get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
-                               FakeResponse(200, GET_SNAPSHOTS_RESULT)]
+                               FakeResponse(200, GET_SNAPSHOTS_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
         self.driver.common._stats = {}
         self.driver.common._stats['pools'] = [
             {'location_info': {'pool_id': 30}}]
         ret = self.driver.create_snapshot(TEST_SNAPSHOT[0])
         self.assertEqual('1', ret['provider_location'])
         self.assertEqual(1, get_volume_type_extra_specs.call_count)
-        self.assertEqual(4, request.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
+        self.assertEqual(5, request.call_count)
+
+    @mock.patch.object(requests.Session, "request")
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
+    @mock.patch.object(sqlalchemy_api, 'volume_get', side_effect=_volume_get)
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_create_snapshot_qos(
+            self, get_volume_type_qos_specs, volume_get,
+            get_volume_type_extra_specs, request):
+        input_qos_specs = {
+            'qos_specs': {
+                'consumer': 'back-end',
+                'specs': {'upperIops': '1000'}}}
+        get_volume_type_qos_specs.return_value = input_qos_specs
+        get_volume_type_extra_specs.return_value = {}
+        request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(200, GET_SNAPSHOTS_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
+        self.driver.common._stats = {}
+        self.driver.common._stats['pools'] = [
+            {'location_info': {'pool_id': 30}}]
+        ret = self.driver.create_snapshot(TEST_SNAPSHOT[1])
+        self.assertEqual('1', ret['provider_location'])
+        self.assertEqual(1, get_volume_type_extra_specs.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
+        self.assertEqual(6, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
     def test_delete_snapshot(self, request):
-        request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
+        request.side_effect = [FakeResponse(200, GET_LDEV_RESULT_SNAP),
                                FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
@@ -650,32 +704,72 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
         self.assertEqual(4, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
+    def test_delete_snapshot_is_invalid_ldev(self, request):
+        request.return_value = FakeResponse(200, GET_LDEV_RESULT)
+        self.driver.delete_snapshot(TEST_SNAPSHOT[0])
+        self.assertEqual(1, request.call_count)
+
+    @mock.patch.object(requests.Session, "request")
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
-    def test_create_cloned_volume(
-            self, get_volume_type_extra_specs, request):
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_create_cloned_volume(self, get_volume_type_qos_specs,
+                                  get_volume_type_extra_specs, request):
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(200, GET_SNAPSHOTS_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
         get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         self.driver.common._stats = {}
         self.driver.common._stats['pools'] = [
             {'location_info': {'pool_id': 30}}]
         vol = self.driver.create_cloned_volume(TEST_VOLUME[0], TEST_VOLUME[1])
         self.assertEqual('1', vol['provider_location'])
         self.assertEqual(1, get_volume_type_extra_specs.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
         self.assertEqual(5, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
     def test_create_volume_from_snapshot(
-            self, get_volume_type_extra_specs, request):
+            self, get_volume_type_qos_specs, get_volume_type_extra_specs,
+            request):
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(200, GET_SNAPSHOTS_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
+        get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
+        self.driver.common._stats = {}
+        self.driver.common._stats['pools'] = [
+            {'location_info': {'pool_id': 30}}]
+        vol = self.driver.create_volume_from_snapshot(
+            TEST_VOLUME[0], TEST_SNAPSHOT[0])
+        self.assertEqual('1', vol['provider_location'])
+        self.assertEqual(1, get_volume_type_extra_specs.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
+        self.assertEqual(5, request.call_count)
+
+    @mock.patch.object(requests.Session, "request")
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_create_volume_from_snapshot_qos(
+            self, get_volume_type_qos_specs, get_volume_type_extra_specs,
+            request):
+        request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(200, GET_SNAPSHOTS_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
+        input_qos_specs = {
+            'qos_specs': {
+                'consumer': 'back-end',
+                'specs': {'upperIops': '1000'}}}
+        get_volume_type_qos_specs.return_value = input_qos_specs
         get_volume_type_extra_specs.return_value = {}
         self.driver.common._stats = {}
         self.driver.common._stats['pools'] = [
@@ -684,7 +778,8 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
             TEST_VOLUME[0], TEST_SNAPSHOT[0])
         self.assertEqual('1', vol['provider_location'])
         self.assertEqual(1, get_volume_type_extra_specs.call_count)
-        self.assertEqual(5, request.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
+        self.assertEqual(6, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
@@ -806,23 +901,31 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
         self.assertEqual(6, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
-    def test_manage_existing(self, request):
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_manage_existing(self, get_volume_type_qos_specs, request):
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
-                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(200, GET_LDEVS_RESULT)]
         ret = self.driver.manage_existing(
             TEST_VOLUME[0], self.test_existing_ref)
         self.assertEqual('1', ret['provider_location'])
-        self.assertEqual(2, request.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
+        self.assertEqual(3, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
-    def test_manage_existing_name(self, request):
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_manage_existing_name(self, get_volume_type_qos_specs, request):
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         request.side_effect = [FakeResponse(200, GET_LDEVS_RESULT),
                                FakeResponse(200, GET_LDEV_RESULT),
-                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(200, GET_LDEVS_RESULT)]
         ret = self.driver.manage_existing(
             TEST_VOLUME[0], self.test_existing_ref_name)
         self.assertEqual('1', ret['provider_location'])
-        self.assertEqual(3, request.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
+        self.assertEqual(4, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
     def test_manage_existing_get_size(self, request):
@@ -856,20 +959,19 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
             self.driver.copy_image_to_volume(
                 self.ctxt, TEST_VOLUME[0], image_service, image_id)
         mock_copy_image.assert_called_with(
-            self.ctxt, TEST_VOLUME[0], image_service, image_id)
+            self.ctxt, TEST_VOLUME[0], image_service, image_id,
+            disable_sparse=False)
         self.assertEqual(1, request.call_count)
 
     @mock.patch.object(requests.Session, "request")
     def test_update_migrated_volume(self, request):
         request.return_value = FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)
-        self.assertRaises(
-            NotImplementedError,
-            self.driver.update_migrated_volume,
-            self.ctxt,
-            TEST_VOLUME[0],
-            TEST_VOLUME[1],
-            "available")
+        ret = self.driver.update_migrated_volume(
+            self.ctxt, TEST_VOLUME[0], TEST_VOLUME[1], "available")
         self.assertEqual(1, request.call_count)
+        actual = ({'_name_id': TEST_VOLUME[1]['id'],
+                   'provider_location': TEST_VOLUME[1]['provider_location']})
+        self.assertEqual(actual, ret)
 
     def test_unmanage_snapshot(self):
         """The driver don't support unmange_snapshot."""
@@ -879,10 +981,12 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
             TEST_SNAPSHOT[0])
 
     @mock.patch.object(requests.Session, "request")
-    def test_retype(self, request):
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_retype(self, get_volume_type_qos_specs, request):
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(200, GET_LDEV_RESULT),
-                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(200, GET_LDEVS_RESULT)]
         host = {
             'capabilities': {
                 'location_info': {
@@ -890,8 +994,10 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
                 },
             },
         }
-        new_type = {'extra_specs': {
-            'hbsd:capacity_saving': 'deduplication_compression'}}
+        extra_specs = {'hbsd:capacity_saving': 'deduplication_compression'}
+        new_type = fake_volume.fake_volume_type_obj(
+            CTXT, id='00000000-0000-0000-0000-{0:012d}'.format(0),
+            extra_specs=extra_specs)
         old_specs = {'hbsd:capacity_saving': 'disable'}
         new_specs = {'hbsd:capacity_saving': 'deduplication_compression'}
         old_type_ref = volume_types.create(self.ctxt, 'old', old_specs)
@@ -900,7 +1006,7 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
                                               new_type_ref['id'])[0]
         ret = self.driver.retype(
             self.ctxt, TEST_VOLUME[0], new_type, diff, host)
-        self.assertEqual(3, request.call_count)
+        self.assertEqual(4, request.call_count)
         self.assertTrue(ret)
 
     @mock.patch.object(requests.Session, "request")
@@ -954,9 +1060,12 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
 
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
     def test_create_group_from_src_volume(
-            self, get_volume_type_extra_specs, request):
+            self, get_volume_type_qos_specs, get_volume_type_extra_specs,
+            request):
         get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
@@ -970,6 +1079,7 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
             source_group=TEST_GROUP[0], source_vols=[TEST_VOLUME[0]]
         )
         self.assertEqual(1, get_volume_type_extra_specs.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
         self.assertEqual(5, request.call_count)
         actual = (
             None, [{'id': TEST_VOLUME[1]['id'], 'provider_location': '1'}])
@@ -977,9 +1087,12 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
 
     @mock.patch.object(requests.Session, "request")
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
     def test_create_group_from_src_snapshot(
-            self, get_volume_type_extra_specs, request):
+            self, get_volume_type_qos_specs, get_volume_type_extra_specs,
+            request):
         get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
@@ -993,7 +1106,40 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
             group_snapshot=TEST_GROUP_SNAP[0], snapshots=[TEST_SNAPSHOT[0]]
         )
         self.assertEqual(1, get_volume_type_extra_specs.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
         self.assertEqual(5, request.call_count)
+        actual = (
+            None, [{'id': TEST_VOLUME[0]['id'], 'provider_location': '1'}])
+        self.assertTupleEqual(actual, ret)
+
+    @mock.patch.object(requests.Session, "request")
+    @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
+    def test_create_group_from_src_snapshot_qos(
+            self, get_volume_type_qos_specs, get_volume_type_extra_specs,
+            request):
+        input_qos_specs = {
+            'qos_specs': {
+                'consumer': 'back-end',
+                'specs': {'upperIops': '1000'}}}
+        get_volume_type_qos_specs.return_value = input_qos_specs
+        get_volume_type_extra_specs.return_value = {}
+        request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(200, GET_SNAPSHOTS_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
+        self.driver.common._stats = {}
+        self.driver.common._stats['pools'] = [
+            {'location_info': {'pool_id': 30}}]
+        ret = self.driver.create_group_from_src(
+            self.ctxt, TEST_GROUP[0], [TEST_VOLUME[0]],
+            group_snapshot=TEST_GROUP_SNAP[0], snapshots=[TEST_SNAPSHOT[1]]
+        )
+        self.assertEqual(1, get_volume_type_extra_specs.call_count)
+        self.assertEqual(1, get_volume_type_qos_specs.call_count)
+        self.assertEqual(6, request.call_count)
         actual = (
             None, [{'id': TEST_VOLUME[0]['id'], 'provider_location': '1'}])
         self.assertTupleEqual(actual, ret)
@@ -1025,15 +1171,18 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
     @mock.patch.object(sqlalchemy_api, 'volume_get', side_effect=_volume_get)
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
     @mock.patch.object(volume_utils, 'is_group_a_cg_snapshot_type')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
     def test_create_group_snapshot_non_cg(
-            self, is_group_a_cg_snapshot_type, get_volume_type_extra_specs,
-            volume_get, request):
+            self, get_volume_type_qos_specs, is_group_a_cg_snapshot_type,
+            get_volume_type_extra_specs, volume_get, request):
         is_group_a_cg_snapshot_type.return_value = False
         get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         request.side_effect = [FakeResponse(200, GET_LDEV_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
-                               FakeResponse(200, GET_SNAPSHOTS_RESULT)]
+                               FakeResponse(200, GET_SNAPSHOTS_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT)]
         self.driver.common._stats = {}
         self.driver.common._stats['pools'] = [
             {'location_info': {'pool_id': 30}}]
@@ -1041,7 +1190,7 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
             self.ctxt, TEST_GROUP_SNAP[0], [TEST_SNAPSHOT[0]]
         )
         self.assertEqual(1, get_volume_type_extra_specs.call_count)
-        self.assertEqual(4, request.call_count)
+        self.assertEqual(5, request.call_count)
         actual = (
             {'status': 'available'},
             [{'id': TEST_SNAPSHOT[0]['id'],
@@ -1054,12 +1203,15 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
     @mock.patch.object(sqlalchemy_api, 'volume_get', side_effect=_volume_get)
     @mock.patch.object(volume_types, 'get_volume_type_extra_specs')
     @mock.patch.object(volume_utils, 'is_group_a_cg_snapshot_type')
+    @mock.patch.object(volume_types, 'get_volume_type_qos_specs')
     def test_create_group_snapshot_cg(
-            self, is_group_a_cg_snapshot_type, get_volume_type_extra_specs,
-            volume_get, request):
+            self, get_volume_type_qos_specs, is_group_a_cg_snapshot_type,
+            get_volume_type_extra_specs, volume_get, request):
         is_group_a_cg_snapshot_type.return_value = True
         get_volume_type_extra_specs.return_value = {}
+        get_volume_type_qos_specs.return_value = {'qos_specs': None}
         request.side_effect = [FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
+                               FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
                                FakeResponse(200, GET_SNAPSHOTS_RESULT_PAIR),
                                FakeResponse(202, COMPLETED_SUCCEEDED_RESULT),
@@ -1071,7 +1223,7 @@ class HBSDRESTISCSIDriverTest(test.TestCase):
             self.ctxt, TEST_GROUP_SNAP[0], [TEST_SNAPSHOT[0]]
         )
         self.assertEqual(1, get_volume_type_extra_specs.call_count)
-        self.assertEqual(5, request.call_count)
+        self.assertEqual(6, request.call_count)
         actual = (
             None,
             [{'id': TEST_SNAPSHOT[0]['id'],

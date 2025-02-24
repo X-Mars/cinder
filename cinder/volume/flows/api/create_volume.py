@@ -11,9 +11,7 @@
 #    under the License.
 
 
-from __future__ import annotations  # Remove when only supporting python 3.9+
-
-from typing import Any, Optional, Type, Union  # noqa: H301
+from typing import Any, Optional, Type, Union
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -358,11 +356,12 @@ class ExtractVolumeRequestTask(flow_utils.CinderTask):
             self,
             key_manager,
             context: context.RequestContext,
-            volume_type_id: str,
+            volume_type_id: Optional[str],
             snapshot: Optional[objects.Snapshot],
             source_volume: Optional[objects.Volume],
             image_metadata: Optional[dict[str, Any]]) -> Optional[str]:
-        if volume_types.is_encrypted(context, volume_type_id):
+        if volume_type_id and volume_types.is_encrypted(
+                context, volume_type_id):
             encryption_key_id = None
 
             if snapshot is not None:  # creating from snapshot

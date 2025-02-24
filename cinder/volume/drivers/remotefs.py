@@ -27,7 +27,7 @@ import string
 import tempfile
 import time
 import typing
-from typing import Callable, List, Optional, Tuple, Union  # noqa: H301
+from typing import Callable, List, Optional, Tuple, Union
 
 from castellan import key_manager
 from os_brick.remotefs import remotefs as remotefs_brick
@@ -37,7 +37,6 @@ from oslo_serialization import jsonutils
 from oslo_utils import imageutils
 from oslo_utils.secretutils import md5
 from oslo_utils import units
-import six
 
 from cinder import compute
 from cinder import context
@@ -524,7 +523,8 @@ class RemoteFSDriver(driver.BaseVD):
                              context: context.RequestContext,
                              volume: objects.Volume,
                              image_service,
-                             image_id: str) -> None:
+                             image_id: str,
+                             disable_sparse: bool = False) -> None:
         """Fetch the image from image_service and write it to the volume."""
 
         image_utils.fetch_to_raw(context,
@@ -533,7 +533,8 @@ class RemoteFSDriver(driver.BaseVD):
                                  self.local_path(volume),
                                  self.configuration.volume_dd_blocksize,
                                  size=volume.size,
-                                 run_as_root=self._execute_as_root)
+                                 run_as_root=self._execute_as_root,
+                                 disable_sparse=disable_sparse)
 
         # NOTE (leseb): Set the virtual size of the image
         # the raw conversion overwrote the destination file
@@ -867,7 +868,8 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
 
         info = image_utils.qemu_img_info(path,
                                          force_share=force_share,
-                                         run_as_root=run_as_root)
+                                         run_as_root=run_as_root,
+                                         allow_qcow2_backing_file=True)
         if info.image:
             info.image = os.path.basename(info.image)
         if info.backing_file:
@@ -1037,7 +1039,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
 
         Returns string in a hex format.
         """
-        if isinstance(base_str, six.text_type):
+        if isinstance(base_str, str):
             base_str = base_str.encode('utf-8')
         return md5(base_str, usedforsecurity=False).hexdigest()
 
@@ -1256,7 +1258,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
 
         LOG.info('Deleting stale snapshot: %s', snapshot.id)
         self._delete(snapshot_path)
-        del(snap_info[snapshot.id])
+        del (snap_info[snapshot.id])
         self._write_info_file(info_path, snap_info)
 
     def _delete_snapshot(self, snapshot: objects.Snapshot) -> None:
@@ -1433,7 +1435,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
                 self._rebase_img(higher_file_path, base_file, base_file_fmt)
 
         # Remove snapshot_file from info
-        del(snap_info[snapshot.id])
+        del (snap_info[snapshot.id])
         self._write_info_file(info_path, snap_info)
 
     def _create_volume_from_snapshot(self,
@@ -1718,9 +1720,18 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
             self._create_snapshot_online(snapshot,
                                          backing_filename,
                                          new_snap_path)
+            # Update the format for the volume and the connection_info. The
+            # connection_info needs to reflect the current volume format in
+            # order for Nova to create the disk device correctly whenever the
+            # instance is stopped/started or rebooted.
+            new_format = 'qcow2'
+            snapshot.volume.admin_metadata['format'] = new_format
+            with snapshot.volume.obj_as_admin():
+                snapshot.volume.save()
             # Update reference in the only attachment (no multi-attach support)
             attachment = snapshot.volume.volume_attachment[0]
             attachment.connection_info['name'] = active
+            attachment.connection_info['format'] = new_format
             # Let OVO know it has been updated
             attachment.connection_info = attachment.connection_info
             attachment.save()
@@ -1834,7 +1845,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
                            'type': 'qcow2',
                            'volume_id': snapshot.volume.id}
 
-            del(snap_info[snapshot.id])
+            del (snap_info[snapshot.id])
             update_format = True
         else:
             # blockCommit snapshot into base
@@ -1847,7 +1858,7 @@ class RemoteFSSnapDriverBase(RemoteFSDriver):
                            'type': 'qcow2',
                            'volume_id': snapshot.volume.id}
 
-            del(snap_info[snapshot.id])
+            del (snap_info[snapshot.id])
 
         self._nova_assisted_vol_snap_delete(context, snapshot, delete_info)
 

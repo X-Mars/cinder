@@ -13,11 +13,11 @@
 #    under the License.
 
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import timeutils
-from pytz import timezone
 
 from cinder import context
 from cinder import objects
@@ -34,11 +34,13 @@ class ImageVolumeCache(object):
                  db,
                  volume_api,
                  max_cache_size_gb: int = 0,
-                 max_cache_size_count: int = 0):
+                 max_cache_size_count: int = 0,
+                 clone_across_pools: bool = False):
         self.db = db
         self.volume_api = volume_api
         self.max_cache_size_gb = int(max_cache_size_gb)
         self.max_cache_size_count = int(max_cache_size_count)
+        self.clone_across_pools = bool(clone_across_pools)
         self.notifier = rpc.get_notifier('volume', CONF.host)
 
     def get_by_image_volume(self,
@@ -55,11 +57,17 @@ class ImageVolumeCache(object):
         self._notify_cache_eviction(context, cache_entry['image_id'],
                                     cache_entry['host'])
 
-    @staticmethod
-    def _get_query_filters(volume_ref: objects.Volume) -> dict:
+    def _get_query_filters(self, volume_ref: objects.Volume) -> dict:
         if volume_ref.is_clustered:
             return {'cluster_name': volume_ref.cluster_name}
-        return {'host': volume_ref.host}
+        if not self.clone_across_pools:
+            return {'host': volume_ref.host}
+        # FIXME(whoami-rajat): If we have two cinder backends pointing to
+        # two different storage arrays, this logic will allow the operation
+        # to proceed to clone across two storage arrays which will fail
+        # eventually. We should at least filter with the hostname in the
+        # given host value hostname@backend#pool.
+        return {}
 
     def get_entry(self,
                   context: context.RequestContext,
@@ -114,7 +122,7 @@ class ImageVolumeCache(object):
         if isinstance(image_updated_at, str):
             image_updated_at = timeutils.parse_strtime(image_updated_at)
         else:
-            image_updated_at = image_updated_at.astimezone(timezone('UTC'))
+            image_updated_at = image_updated_at.astimezone(ZoneInfo('UTC'))
 
         cache_entry = self.db.image_volume_cache_create(
             context,
@@ -252,9 +260,9 @@ class ImageVolumeCache(object):
                              image_meta: dict) -> bool:
         """Ensure that the cache entry image data is still valid."""
         image_updated_utc = (image_meta['updated_at']
-                             .astimezone(timezone('UTC')))
+                             .astimezone(ZoneInfo('UTC')))
         cache_updated_utc = (cache_entry['image_updated_at']
-                             .replace(tzinfo=timezone('UTC')))
+                             .replace(tzinfo=ZoneInfo('UTC')))
 
         LOG.debug('Image-volume cache entry image_update_at = %(entry_utc)s, '
                   'requested image updated_at = %(image_utc)s.',

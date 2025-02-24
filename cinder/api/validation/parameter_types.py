@@ -157,6 +157,15 @@ extra_specs = {
     'additionalProperties': False
 }
 
+image_metadata = {
+    'type': 'object',
+    'patternProperties': {
+        '^[a-zA-Z0-9-_:. /]{1,255}$': {
+            'type': 'string', 'format': 'mysql_text'
+        }
+    },
+    'additionalProperties': False
+}
 
 extra_specs_with_no_spaces_key = {
     'type': 'object',
@@ -260,7 +269,7 @@ quota_class_set = {
     'type': 'object',
     'format': 'quota_class_set',
     'patternProperties': {
-        '^[a-zA-Z0-9-_:. ]{1,255}$': {
+        '^[a-zA-Z0-9-_:. ]{1,300}$': {
             'type': ['integer', 'string'],
             'pattern': '^[0-9]*$', 'minimum': -1, 'minLength': 1,
             'maximum': constants.DB_MAX_INT

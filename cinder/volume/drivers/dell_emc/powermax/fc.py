@@ -18,6 +18,7 @@ import ast
 from oslo_log import log as logging
 
 from cinder.common import constants
+from cinder import coordination
 from cinder import exception
 from cinder import interface
 from cinder.volume import driver
@@ -132,12 +133,18 @@ class PowerMaxFCDriver(san.SanDriver, driver.FibreChannelDriver):
               - Support for Failover Abilities (bp/powermax-failover-abilities)
         4.4.0 - Early check for status of port
         4.4.1 - Report trim/discard support
+        4.5.0 - Add PowerMax v4 support
+        4.5.1 - Add active/active compliance
+        4.5.2 - Add 'disable_protected_snap' option
     """
 
-    VERSION = "4.4.1"
+    VERSION = "4.5.2"
+    SUPPORTS_ACTIVE_ACTIVE = True
 
     # ThirdPartySystems wiki
     CI_WIKI_NAME = "DellEMC_PowerMAX_CI"
+
+    driver_prefix = 'powermax'
 
     def __init__(self, *args, **kwargs):
 
@@ -162,6 +169,9 @@ class PowerMaxFCDriver(san.SanDriver, driver.FibreChannelDriver):
 
     def check_for_setup_error(self):
         pass
+
+    def _init_vendor_properties(self):
+        return self.common.get_vendor_properties(self)
 
     def create_volume(self, volume):
         """Creates a PowerMax/VMAX volume.
@@ -248,6 +258,7 @@ class PowerMaxFCDriver(san.SanDriver, driver.FibreChannelDriver):
         """
         pass
 
+    @coordination.synchronized('{self.driver_prefix}-{volume.id}')
     def initialize_connection(self, volume, connector):
         """Initializes the connection and returns connection info.
 
@@ -320,6 +331,7 @@ class PowerMaxFCDriver(san.SanDriver, driver.FibreChannelDriver):
 
         return data
 
+    @coordination.synchronized('{self.driver_prefix}-{volume.id}')
     def terminate_connection(self, volume, connector, **kwargs):
         """Disallow connection from connector.
 
@@ -661,7 +673,18 @@ class PowerMaxFCDriver(san.SanDriver, driver.FibreChannelDriver):
         :param groups: replication groups
         :returns: secondary_id, volume_update_list, group_update_list
         """
-        return self.common.failover_host(volumes, secondary_id, groups)
+        active_backend_id, volume_update_list, group_update_list = (
+            self.common.failover(volumes, secondary_id, groups))
+        self.common.failover_completed(secondary_id, False)
+        return active_backend_id, volume_update_list, group_update_list
+
+    def failover(self, context, volumes, secondary_id=None, groups=None):
+        """Like failover but for a host that is clustered."""
+        return self.common.failover(volumes, secondary_id, groups)
+
+    def failover_completed(self, context, active_backend_id=None):
+        """This method is called after failover for clustered backends."""
+        return self.common.failover_completed(active_backend_id, True)
 
     def create_group(self, context, group):
         """Creates a generic volume group.
@@ -772,3 +795,7 @@ class PowerMaxFCDriver(san.SanDriver, driver.FibreChannelDriver):
         :param snapshot: the cinder snapshot object
         """
         self.common.revert_to_snapshot(volume, snapshot)
+
+    @classmethod
+    def clean_volume_file_locks(cls, volume_id):
+        coordination.synchronized_remove(f'{cls.driver_prefix}-{volume_id}')

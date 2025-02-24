@@ -20,7 +20,6 @@ import sys
 import time
 
 from oslo_log import log as logging
-import six
 
 from cinder import coordination
 from cinder import exception
@@ -40,11 +39,12 @@ class PowerMaxMasking(object):
     Masking code to dynamically create a masking view.
     It supports VMAX 3, All Flash and PowerMax arrays.
     """
-    def __init__(self, prtcl, rest):
+    def __init__(self, prtcl, rest, configuration):
         self.protocol = prtcl
         self.utils = utils.PowerMaxUtils()
         self.rest = rest
-        self.provision = provision.PowerMaxProvision(self.rest)
+        self.provision = provision.PowerMaxProvision(self.rest,
+                                                     configuration)
 
     def setup_masking_view(
             self, serial_number, volume, masking_view_dict, extra_specs):
@@ -108,7 +108,7 @@ class PowerMaxMasking(object):
                 "for masking view %(maskingview_name)s. "
                 "Attempting rollback.",
                 {'maskingview_name': masking_view_dict[utils.MV_NAME]})
-            error_message = six.text_type(e)
+            error_message = str(e)
 
         rollback_dict['default_sg_name'] = default_sg_name
 
@@ -455,7 +455,7 @@ class PowerMaxMasking(object):
                        "%(parent_sg)s. Exception received was %(e)s"
                        % {'child_sg': child_sg_name,
                           'parent_sg': parent_sg_name,
-                          'e': six.text_type(e)})
+                          'e': str(e)})
                 LOG.error(msg)
         return msg
 
@@ -666,8 +666,7 @@ class PowerMaxMasking(object):
             return
 
         @coordination.synchronized(
-            "emc-sg-{source_storage_group_name}-{serial_number}")
-        @coordination.synchronized(
+            "emc-sg-{source_storage_group_name}-{serial_number}",
             "emc-sg-{target_storage_group_name}-{serial_number}")
         def do_move_volume_between_storage_groups(
                 serial_number, source_storage_group_name,
@@ -867,7 +866,7 @@ class PowerMaxMasking(object):
                 msg = ("Exception adding volume %(vol)s to %(sg)s. "
                        "Exception received was %(e)s."
                        % {'vol': volume_name, 'sg': storagegroup_name,
-                          'e': six.text_type(e)})
+                          'e': str(e)})
                 LOG.error(msg)
         return msg
 
@@ -1127,7 +1126,7 @@ class PowerMaxMasking(object):
 
         except Exception as e:
             error_message = ("Error creating new masking view. Exception "
-                             "received: %(e)s" % {'e': six.text_type(e)})
+                             "received: %(e)s" % {'e': str(e)})
         return error_message
 
     def check_if_rollback_action_for_masking_required(
@@ -1173,7 +1172,7 @@ class PowerMaxMasking(object):
                 "your volume to the default storage group for its slo. "
                 "Exception received: %(e)s")
                 % {'volume_name': rollback_dict['volume_name'],
-                   'e': six.text_type(e)})
+                   'e': str(e)})
             LOG.exception(error_message)
             raise exception.VolumeBackendAPIException(message=error_message)
 
@@ -2041,9 +2040,13 @@ class PowerMaxMasking(object):
                 if 'STG-' in storage_group_list[0]:
                     return mv_dict
 
-        split_pool = extra_specs['pool_name'].split('+')
-        src_slo = split_pool[0]
-        src_wl = split_pool[1] if len(split_pool) == 4 else 'NONE'
+        if 'pool_name' in extra_specs:
+            split_pool = extra_specs['pool_name'].split('+')
+            src_slo = split_pool[0]
+            src_wl = split_pool[1] if len(split_pool) == 4 else 'NONE'
+        else:
+            src_slo = extra_specs[utils.SLO]
+            src_wl = extra_specs[utils.WORKLOAD]
         slo_wl_combo = self.utils.truncate_string(src_slo + src_wl.upper(), 10)
         for sg in sg_list.get('storageGroupId', []):
             if slo_wl_combo in sg:
