@@ -25,8 +25,6 @@
    should be placed in volume_utils instead.
 """
 
-from __future__ import annotations  # Remove when only supporting python 3.9+
-
 from collections import OrderedDict
 import contextlib
 import datetime
@@ -44,8 +42,8 @@ import stat
 import sys
 import tempfile
 import typing
-from typing import Callable, Iterable, Iterator  # noqa: H301
-from typing import Optional, Type, Union  # noqa: H301
+from typing import Callable, Iterable, Iterator
+from typing import Optional, Type, Union
 
 import eventlet
 from eventlet import tpool
@@ -576,7 +574,7 @@ def check_string_length(value: str, name: str, min_length: int = 0,
         strutils.check_string_length(value, name=name,
                                      min_length=min_length,
                                      max_length=max_length)
-    except(ValueError, TypeError) as exc:
+    except (ValueError, TypeError) as exc:
         raise exception.InvalidInput(reason=exc)
 
     if not allow_all_spaces and value.isspace():

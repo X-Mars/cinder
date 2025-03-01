@@ -13,12 +13,11 @@
 """Add resource indexes
 
 Revision ID: daa98075b90d
-Revises: 9c74c1c6971f
+Revises: c92a3e68beed
 Create Date: 2021-11-26 10:26:41.883072
 """
 
 from alembic import op
-from oslo_db.sqlalchemy import enginefacade
 from oslo_db.sqlalchemy import utils
 from oslo_log import log as logging
 
@@ -49,12 +48,12 @@ INDEXES = (
 
 
 def upgrade():
-    engine = enginefacade.reader.get_engine()
-    is_mysql = engine.dialect.name == 'mysql'
+    conn = op.get_bind()
+    is_mysql = conn.dialect.name == 'mysql'
 
     for table, idx_name, fields in INDEXES:
         # Skip creation in mysql if it already has the index
-        if is_mysql and utils.index_exists(engine, table, idx_name):
+        if is_mysql and utils.index_exists(conn, table, idx_name):
             LOG.info('Skipping index %s, already exists', idx_name)
         else:
             op.create_index(idx_name, table, fields)

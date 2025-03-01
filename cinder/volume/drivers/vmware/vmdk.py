@@ -194,8 +194,9 @@ def _get_volume_type_extra_spec(type_id, spec_key, possible_values=None,
         return default_value
 
     spec_key = ('vmware:%s') % spec_key
-    spec_value = volume_types.get_volume_type_extra_specs(type_id,
-                                                          spec_key)
+    spec_value = volume_types.get_volume_type_extra_specs(type_id).get(
+        spec_key, False)
+
     if not spec_value:
         LOG.debug("Returning default spec value: %s.", default_value)
         return default_value
@@ -1441,7 +1442,8 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
             context, volume, image_service, image_meta['id'])
         return (ret, True)
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id,
+                             disable_sparse=False):
         """Creates volume from image.
 
         This method only supports Glance image of VMDK disk format.
@@ -1453,6 +1455,8 @@ class VMwareVcVmdkDriver(driver.VolumeDriver):
         :param volume: Volume object
         :param image_service: Glance image service
         :param image_id: Glance image id
+        :param disable_sparse: Enable or disable sparse copy. Default=False.
+                               This parameter is ignored by VMDK driver.
         """
         LOG.debug("Copy glance image: %s to create new volume.", image_id)
 

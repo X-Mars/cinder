@@ -14,7 +14,6 @@
 
 from oslo_log import log as logging
 from oslo_utils import excutils
-import six
 
 from cinder.common import constants
 from cinder import exception
@@ -178,11 +177,11 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         target_names = self.targets.keys()
         if provider_location:
             target_name = provider_location.split(',1 ')[1].split(' ')[0]
-            if not(self.targets.get(target_name)):
+            if not (self.targets.get(target_name)):
                 self.targets[target_name] = []
-            if not(volume['name'] in self.targets[target_name]):
+            if not (volume['name'] in self.targets[target_name]):
                 self.targets[target_name].append(volume['name'])
-        elif not(target_names):
+        elif not (target_names):
             # create first target and target group
             target_name = self._create_target(0)
             self.targets[target_name].append(volume['name'])
@@ -194,7 +193,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
             if len(self.targets[target_name]) >= 20:
                 # create new target and target group
                 target_name = self._create_target(len(target_names))
-            if not(volume['name'] in self.targets[target_name]):
+            if not (volume['name'] in self.targets[target_name]):
                 self.targets[target_name].append(volume['name'])
         return target_name
 
@@ -225,7 +224,7 @@ class NexentaISCSIDriver(driver.ISCSIDriver):
         self.nms.zvol.create(
             self._get_zvol_name(volume['name']),
             '%sG' % (volume['size'],),
-            six.text_type(self.configuration.nexenta_blocksize),
+            str(self.configuration.nexenta_blocksize),
             self.configuration.nexenta_sparse)
 
     def extend_volume(self, volume, new_size):

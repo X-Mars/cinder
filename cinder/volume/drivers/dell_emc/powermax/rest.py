@@ -25,17 +25,18 @@ import requests.auth
 import requests.exceptions as r_exc
 # pylint: disable=E0401
 import requests.packages.urllib3.util.retry as requests_retry
-import six
 
 from cinder import exception
 from cinder.i18n import _
 from cinder.utils import retry
 from cinder.volume.drivers.dell_emc.powermax import utils
+from cinder.volume import volume_utils
 
 LOG = logging.getLogger(__name__)
 SLOPROVISIONING = 'sloprovisioning'
 REPLICATION = 'replication'
 SYSTEM = 'system'
+U4P_110_VERSION = '110'
 U4P_100_VERSION = '100'
 MIN_U4P_100_VERSION = '10.0.0.0'
 U4P_92_VERSION = '92'
@@ -93,6 +94,8 @@ class PowerMaxRest(object):
         self.ucode_minor_level = None
         self.is_snap_id = False
         self.u4p_version = None
+        self.rest_api_connect_timeout = 30
+        self.rest_api_read_timeout = 30
 
     def set_rest_credentials(self, array_info):
         """Given the array record set the rest server credentials.
@@ -108,6 +111,14 @@ class PowerMaxRest(object):
         self.base_uri = ("https://%(ip_port)s/univmax/restapi" % {
             'ip_port': ip_port})
         self.session = self._establish_rest_session()
+        new_connect_timeout = (
+            int(array_info.get(utils.REST_API_CONNECT_TIMEOUT_KEY, 0)))
+        if new_connect_timeout > 0:
+            self.rest_api_connect_timeout = new_connect_timeout
+        new_read_timeout = (
+            int(array_info.get(utils.REST_API_READ_TIMEOUT_KEY, 0)))
+        if new_read_timeout > 0:
+            self.rest_api_read_timeout = new_read_timeout
 
     def set_residuals(self, serial_number):
         """Set ucode and snapid information.
@@ -209,6 +220,7 @@ class PowerMaxRest(object):
             self.u4p_failover_lock = False
             raise exception.VolumeBackendAPIException(message=msg)
 
+    @volume_utils.trace()
     def request(self, target_uri, method, params=None, request_object=None,
                 u4p_check=False, retry=False):
         """Sends a request (GET, POST, PUT, DELETE) to the target api.
@@ -243,18 +255,19 @@ class PowerMaxRest(object):
             url = ("%(self.base_uri)s%(target_uri)s" % {
                 'self.base_uri': self.base_uri,
                 'target_uri': target_uri})
-
+            timeout = (self.rest_api_connect_timeout,
+                       self.rest_api_read_timeout)
             if request_object:
                 response = self.session.request(
                     method=method, url=url,
                     data=json.dumps(request_object, sort_keys=True,
-                                    indent=4))
+                                    indent=4), timeout=timeout)
             elif params:
                 response = self.session.request(
-                    method=method, url=url, params=params)
+                    method=method, url=url, params=params, timeout=timeout)
             else:
                 response = self.session.request(
-                    method=method, url=url)
+                    method=method, url=url, timeout=timeout)
 
             status_code = response.status_code
             if retry and status_code and status_code in [STATUS_200,
@@ -289,6 +302,10 @@ class PowerMaxRest(object):
 
         except (r_exc.Timeout, r_exc.ConnectionError,
                 r_exc.HTTPError) as e:
+            if isinstance(e, r_exc.Timeout):
+                msg = _("The %s request to URL %s failed with timeout "
+                        "exception %s" % (method, url, str(e)))
+                LOG.error(msg)
             if self.u4p_failover_enabled or u4p_check:
                 if not u4p_check:
                     # Failover process
@@ -316,7 +333,7 @@ class PowerMaxRest(object):
             if retry:
                 self.u4p_failover_lock = False
             msg = _("The %s request to URL %s failed with exception "
-                    "%s" % (method, url, six.text_type(e)))
+                    "%s" % (method, url, str(e)))
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(message=msg)
 
@@ -440,7 +457,7 @@ class PowerMaxRest(object):
                     _("Error %(operation)s. Status code: %(sc)lu. Error: "
                       "%(error)s. Status: %(status)s.") % {
                         'operation': operation, 'sc': rc,
-                        'error': six.text_type(result), 'status': status})
+                        'error': str(result), 'status': status})
                 LOG.error(exception_message)
                 raise exception.VolumeBackendAPIException(
                     message=exception_message)
@@ -761,9 +778,11 @@ class PowerMaxRest(object):
         version, major_version = None, None
         response = self.get_unisphere_version()
         if response and response.get('version'):
-            version = response['version']
-            version_list = version.split('.')
-            major_version = version_list[0][1:] + version_list[1]
+            regex = re.compile(r'^[a-zA-Z]\d+(.\d+){3}$')
+            if regex.match(response['version']):
+                version = response['version']
+                version_list = version.split('.')
+                major_version = version_list[0][1:] + version_list[1]
         return version, major_version
 
     def get_unisphere_version(self):
@@ -1604,7 +1623,7 @@ class PowerMaxRest(object):
                 self.delete_resource(array, SLOPROVISIONING,
                                      "volume", device_id)
 
-    @retry(retry_exc_tuple, interval=2, retries=3)
+    @retry(retry_exc_tuple, interval=2, retries=8)
     def find_mv_connections_for_vol(self, array, maskingview, device_id):
         """Find the host_lun_id for a volume in a masking view.
 
@@ -1627,28 +1646,42 @@ class PowerMaxRest(object):
             try:
                 masking_view_conn = connection_info.get(
                     'maskingViewConnection')
-                if masking_view_conn and isinstance(
-                        masking_view_conn, list):
+                if (masking_view_conn and isinstance(
+                        masking_view_conn, list) and
+                        len(masking_view_conn) > 0):
                     host_lun_id = masking_view_conn[0].get(
                         'host_lun_address')
                     if host_lun_id:
                         host_lun_id = int(host_lun_id, 16)
                     else:
-                        exception_message = (
-                            _('Unable to get host_lun_address for '
-                              'device %(dev)s on masking view %(mv)s. '
-                              'Retrying...')
-                            % {'dev': device_id, 'mv': maskingview})
+                        exception_message = (_("Unable to get "
+                                               "host_lun_address for device "
+                                               "%(dev)s on masking view "
+                                               "%(mv)s. Retrying...")
+                                             % {"dev": device_id,
+                                                "mv": maskingview})
                         LOG.warning(exception_message)
                         raise exception.VolumeBackendAPIException(
                             message=exception_message)
+                else:
+                    exception_message = (_("Unable to retrieve connection "
+                                           "information for volume %(vol)s "
+                                           "in masking view %(mv)s. "
+                                           "Retrying...")
+                                         % {"vol": device_id,
+                                            "mv": maskingview})
+                    LOG.warning(exception_message)
+                    raise exception.VolumeBackendAPIException(
+                        message=exception_message)
             except Exception as e:
-                exception_message = (
-                    _("Unable to retrieve connection information "
-                      "for volume %(vol)s in masking view %(mv)s. "
-                      "Exception received: %(e)s. Retrying...")
-                    % {'vol': device_id, 'mv': maskingview,
-                       'e': e})
+                exception_message = (_("Unable to retrieve connection "
+                                       "information for volume %(vol)s "
+                                       "in masking view %(mv)s. "
+                                       "Exception received: %(e)s. "
+                                       "Retrying...")
+                                     % {"vol": device_id,
+                                        "mv": maskingview,
+                                        "e": e})
                 LOG.warning(exception_message)
                 raise exception.VolumeBackendAPIException(
                     message=exception_message)
@@ -2180,7 +2213,7 @@ class PowerMaxRest(object):
     def modify_volume_snap(self, array, source_id, target_id, snap_name,
                            extra_specs, snap_id=None, link=False, unlink=False,
                            rename=False, new_snap_name=None, restore=False,
-                           list_volume_pairs=None, copy=False):
+                           list_volume_pairs=None, copy=False, symforce=False):
         """Modify a snapvx snapshot
 
         :param array: the array serial number
@@ -2231,7 +2264,7 @@ class PowerMaxRest(object):
                        "copy": copy, "action": action,
                        "star": 'false', "force": force,
                        "exact": 'false', "remote": 'false',
-                       "symforce": 'false'}
+                       "symforce": str(symforce).lower()}
         elif action == "Rename":
             operation = 'Rename snapVx snapshot'
             payload = {"deviceNameListSource": [{"name": source_id}],
@@ -3463,18 +3496,28 @@ class PowerMaxRest(object):
     def validate_unisphere_version(self):
         """Validate that the running Unisphere version meets min requirement
 
+        :raises: InvalidConfigurationValue
         :returns: unisphere_meets_min_req -- boolean
         """
-        running_version, major_version = self.get_uni_version()
-        if major_version == U4P_100_VERSION:
-            self.u4p_version = U4P_100_VERSION
-            minimum_version = MIN_U4P_100_VERSION
-        elif major_version:
-            self.u4p_version = U4P_92_VERSION
-            minimum_version = MIN_U4P_92_VERSION
         unisphere_meets_min_req = False
+        self.u4p_version = U4P_92_VERSION
+        minimum_version = MIN_U4P_92_VERSION
 
-        if running_version and (running_version[0].isalpha()):
+        running_version, major_version = self.get_uni_version()
+        if not running_version or not major_version:
+            LOG.warning("Unable to validate Unisphere instance meets minimum "
+                        "requirements.")
+        else:
+            if int(major_version) >= int(U4P_110_VERSION):
+                msg = _("Unisphere version %(running_version)s "
+                        "is not supported.") % {
+                            'running_version': running_version}
+                LOG.error(msg)
+                raise exception.InvalidConfigurationValue(message=msg)
+            if int(major_version) >= int(U4P_100_VERSION):
+                self.u4p_version = U4P_100_VERSION
+                minimum_version = MIN_U4P_100_VERSION
+
             # remove leading letter
             if running_version.lower()[0] == QUAL_CODE:
                 version = running_version[1:]
@@ -3486,20 +3529,18 @@ class PowerMaxRest(object):
                             "Unisphere.", {'version': running_version})
                 return int(major_version) >= int(self.u4p_version)
 
-        if unisphere_meets_min_req:
-            LOG.info("Unisphere version %(running_version)s meets minimum "
-                     "requirement of version %(minimum_version)s.",
-                     {'running_version': running_version,
-                      'minimum_version': minimum_version})
-        elif running_version:
-            LOG.error("Unisphere version %(running_version)s does not meet "
-                      "minimum requirement for use with this release, please "
-                      "upgrade to Unisphere %(minimum_version)s at minimum.",
-                      {'running_version': running_version,
-                       'minimum_version': minimum_version})
-        else:
-            LOG.warning("Unable to validate Unisphere instance meets minimum "
-                        "requirements.")
+            if unisphere_meets_min_req:
+                LOG.info("Unisphere version %(running_version)s meets minimum "
+                         "requirement of version %(minimum_version)s.",
+                         {'running_version': running_version,
+                          'minimum_version': minimum_version})
+            else:
+                LOG.error("Unisphere version %(running_version)s does "
+                          "not meet minimum requirement for use with this "
+                          "release, please upgrade to Unisphere "
+                          "%(minimum_version)s at minimum.",
+                          {'running_version': running_version,
+                           'minimum_version': minimum_version})
 
         return unisphere_meets_min_req
 

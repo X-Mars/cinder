@@ -19,6 +19,7 @@ import functools
 import hashlib
 import http.client as httpstatus
 import json
+import time
 from typing import Dict
 from typing import List
 from typing import Tuple
@@ -63,6 +64,7 @@ FAKE_LIGHTOS_CLUSTER_INFO: Dict[str, str] = {
 }
 
 FAKE_CLIENT_HOSTNQN = "hostnqn1"
+FAKE_HOST_IPS = ['10.10.0.1']
 VOLUME_BACKEND_NAME = "lightos_backend"
 RESERVED_PERCENTAGE = 30
 DEVICE_SCAN_ATTEMPTS_DEFAULT = 5
@@ -85,6 +87,7 @@ class InitiatorConnectorFactoryMocker:
 class InitialConnectorMock:
     nqn = FAKE_CLIENT_HOSTNQN
     found_discovery_client = True
+    host_ips = FAKE_HOST_IPS
 
     def get_hostnqn(self):
         return self.__class__.nqn
@@ -92,15 +95,18 @@ class InitialConnectorMock:
     def find_dsc(self):
         return self.__class__.found_discovery_client
 
+    def get_host_ips(self):
+        return self.__class__.host_ips
+
     def get_connector_properties(self, root):
         return dict(nqn=self.__class__.nqn,
-                    found_dsc=self.__class__.found_discovery_client)
+                    found_dsc=self.__class__.found_discovery_client,
+                    host_ips=self.__class__.host_ips)
 
 
 def get_connector_properties():
     connector = InitialConnectorMock()
-    return dict(nqn=connector.get_hostnqn(),
-                found_dsc=connector.find_dsc())
+    return connector.get_connector_properties(None)
 
 
 def get_vol_etag(volume):
@@ -172,6 +178,9 @@ class DBMock(object):
             volume["size"] = kwargs["size"]
         if kwargs.get("acl", None):
             volume["acl"] = {'values': kwargs.get('acl')}
+
+        if kwargs.get("ip_acl", None):
+            volume["IPAcl"] = {'values': kwargs.get('ip_acl')}
         volume["ETag"] = get_vol_etag(volume)
         return httpstatus.OK, volume
 
@@ -202,7 +211,7 @@ class DBMock(object):
         return httpstatus.OK, vol
 
     def update_volume(self, **kwargs):
-        assert("project_name" in kwargs and kwargs["project_name"]), \
+        assert "project_name" in kwargs and kwargs["project_name"], \
             "project_name must be provided"
 
     def create_snapshot(self, snapshot) -> Tuple[int, Dict]:
@@ -275,6 +284,7 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
         configuration.lightos_default_compression_enabled = (
             DEFAULT_COMPRESSION)
         configuration.lightos_default_num_replicas = 3
+        configuration.lightos_use_ipacl = True
         configuration.num_volume_device_scan_tries = (
             DEVICE_SCAN_ATTEMPTS_DEFAULT)
         configuration.lightos_api_service_timeout = LIGHTOS_API_SERVICE_TIMEOUT
@@ -287,6 +297,7 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
             "test_lightos_storage.InitiatorConnectorFactoryMocker")
         configuration.volume_backend_name = VOLUME_BACKEND_NAME
         configuration.reserved_percentage = RESERVED_PERCENTAGE
+        configuration.lightos_api_service_snapshots_max_calls = 5
 
         def mocked_safe_get(config, variable_name):
             if hasattr(config, variable_name):
@@ -314,6 +325,10 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
                 return (httpstatus.OK, FAKE_LIGHTOS_CLUSTER_INFO)
             elif cmd == "create_volume":
                 project_name = kwargs["project_name"]
+                ipacl = (
+                    {'values': ['ALLOW_NONE']}
+                    if self.driver.configuration.lightos_use_ipacl
+                    else {'values': ['ALLOW_ANY']})
                 volume = {
                     "project_name": project_name,
                     "name": kwargs["name"],
@@ -322,7 +337,9 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
                     "compression": kwargs["compression"],
                     "src_snapshot_name": kwargs["src_snapshot_name"],
                     "acl": {'values': kwargs.get('acl')},
+                    "IPAcl": ipacl,
                     "state": "Available",
+                    "qosPolicyUUID": kwargs.get("qos_policy", None)
                 }
                 volume["ETag"] = get_vol_etag(volume)
                 code, new_vol = self.db.create_volume(volume)
@@ -396,6 +413,20 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
         self.driver.delete_volume(volume)
         db.volume_destroy(self.ctxt, volume.id)
 
+    def test_create_volume_ipacl_off(self):
+        """Test that lightos_client succeed. ipacl false"""
+        self.driver.configuration.lightos_use_ipacl = False
+        self.driver.do_setup(None)
+
+        vol_type = test_utils.create_volume_type(self.ctxt, self,
+                                                 name='my_vol_type')
+        volume = test_utils.create_volume(self.ctxt, size=4,
+                                          volume_type_id=vol_type.id)
+
+        self.driver.create_volume(volume)
+        self.driver.delete_volume(volume)
+        db.volume_destroy(self.ctxt, volume.id)
+
     def test_create_volume_same_volume_twice_succeed(self):
         """Test succeed to create an exiting volume."""
         self.driver.do_setup(None)
@@ -418,6 +449,10 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
         def send_cmd_mock(cmd, **kwargs):
             if cmd == "create_volume":
                 project_name = kwargs["project_name"]
+                ipacl = (
+                    {'values': ['ALLOW_NONE']}
+                    if self.driver.configuration.lightos_use_ipacl
+                    else {'values': ['ALLOW_ANY']})
                 volume = {
                     "project_name": project_name,
                     "name": kwargs["name"],
@@ -426,6 +461,7 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
                     "compression": kwargs["compression"],
                     "src_snapshot_name": kwargs["src_snapshot_name"],
                     "acl": {'values': kwargs.get('acl')},
+                    "IPAcl": ipacl,
                     "state": vol_state,
                 }
                 volume["ETag"] = get_vol_etag(volume)
@@ -462,6 +498,10 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
         def send_cmd_mock(cmd, **kwargs):
             if cmd == "create_volume":
                 project_name = kwargs["project_name"]
+                ipacl = (
+                    {'values': ['ALLOW_NONE']}
+                    if self.driver.configuration.lightos_use_ipacl
+                    else {'values': ['ALLOW_ANY']})
                 volume = {
                     "project_name": project_name,
                     "name": kwargs["name"],
@@ -470,6 +510,7 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
                     "compression": kwargs["compression"],
                     "src_snapshot_name": kwargs["src_snapshot_name"],
                     "acl": {'values': kwargs.get('acl')},
+                    "IPAcl": ipacl,
                     "state": "Migrating",
                 }
                 volume["ETag"] = get_vol_etag(volume)
@@ -537,11 +578,11 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
                                            volume_type_id=vol_type2.id)
         volume3 = test_utils.create_volume(self.ctxt, size=4,
                                            volume_type_id=vol_type3.id)
-        compression, _, _ = self.driver._get_volume_specs(volume1)
+        compression, _, _, _ = self.driver._get_volume_specs(volume1)
         self.assertTrue(compression == "True")
-        compression, _, _ = self.driver._get_volume_specs(volume2)
+        compression, _, _, _ = self.driver._get_volume_specs(volume2)
         self.assertTrue(compression == "True")
-        compression, _, _ = self.driver._get_volume_specs(volume3)
+        compression, _, _, _ = self.driver._get_volume_specs(volume3)
         self.assertTrue(compression == "False")
 
         db.volume_destroy(self.ctxt, volume1.id)
@@ -570,11 +611,11 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
                                            volume_type_id=vol_type2.id)
         volume3 = test_utils.create_volume(self.ctxt, size=4,
                                            volume_type_id=vol_type3.id)
-        compression, _, _ = self.driver._get_volume_specs(volume1)
+        compression, _, _, _ = self.driver._get_volume_specs(volume1)
         self.assertTrue(compression == "False")
-        compression, _, _ = self.driver._get_volume_specs(volume2)
+        compression, _, _, _ = self.driver._get_volume_specs(volume2)
         self.assertTrue(compression == "False")
-        compression, _, _ = self.driver._get_volume_specs(volume3)
+        compression, _, _, _ = self.driver._get_volume_specs(volume3)
         self.assertTrue(compression == "True")
 
         db.volume_destroy(self.ctxt, volume1.id)
@@ -604,6 +645,29 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
 
         self.driver.create_volume(volume)
         self.driver.create_snapshot(snapshot)
+        self.driver.delete_volume(volume)
+        db.volume_destroy(self.ctxt, volume.id)
+
+    @mock.patch.object(time, "sleep", return_value=None)
+    def test_create_snapshot_fail_bad_request(self, mock_sleep):
+        def send_cmd_mock(cmd, **kwargs):
+            if cmd == "create_snapshot":
+                return (httpstatus.BAD_REQUEST, {})
+            else:
+                return cluster_send_cmd(cmd, **kwargs)
+        self.driver.do_setup(None)
+        cluster_send_cmd = deepcopy(self.driver.cluster.send_cmd)
+        self.driver.cluster.send_cmd = send_cmd_mock
+
+        vol_type = test_utils.create_volume_type(self.ctxt, self,
+                                                 name='my_vol_type')
+        volume = test_utils.create_volume(self.ctxt, size=4,
+                                          volume_type_id=vol_type.id)
+        snapshot = test_utils.create_snapshot(self.ctxt, volume_id=volume.id)
+
+        self.driver.create_volume(volume)
+        self.assertRaises(exception.VolumeBackendAPIException,
+                          self.driver.create_snapshot, snapshot)
         self.driver.delete_volume(volume)
         db.volume_destroy(self.ctxt, volume.id)
 
@@ -641,6 +705,7 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
     def test_initialize_connection(self):
         InitialConnectorMock.nqn = "hostnqn1"
         InitialConnectorMock.found_discovery_client = True
+        InitialConnectorMock.host_ips = FAKE_HOST_IPS
         self.driver.do_setup(None)
         vol_type = test_utils.create_volume_type(self.ctxt, self,
                                                  name='my_vol_type')
@@ -657,6 +722,37 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
         self.assertEqual(
             self.db.data['projects']['default']['volumes'][0]['UUID'],
             connection_props['data']['uuid'])
+        self.assertEqual(
+            self.db.data['projects']['default']['volumes'][0]['IPAcl'],
+            {'values': FAKE_HOST_IPS})
+
+        self.driver.delete_volume(volume)
+        db.volume_destroy(self.ctxt, volume.id)
+
+    def test_initialize_connection_ipacl_disabled(self):
+        self.driver.configuration.lightos_use_ipacl = False
+        InitialConnectorMock.nqn = "hostnqn1"
+        InitialConnectorMock.found_discovery_client = True
+        self.driver.do_setup(None)
+        vol_type = test_utils.create_volume_type(self.ctxt, self,
+                                                 name='my_vol_type')
+        volume = test_utils.create_volume(self.ctxt, size=4,
+                                          volume_type_id=vol_type.id)
+        self.driver.create_volume(volume)
+
+        connection_props = \
+            self.driver.initialize_connection(volume,
+                                              get_connector_properties())
+        self.assertIn('driver_volume_type', connection_props)
+        self.assertEqual('lightos', connection_props['driver_volume_type'])
+        self.assertEqual(FAKE_LIGHTOS_CLUSTER_INFO['subsystemNQN'],
+                         connection_props['data']['subsysnqn'])
+        self.assertEqual(
+            self.db.data['projects']['default']['volumes'][0]['UUID'],
+            connection_props['data']['uuid'])
+        self.assertEqual(
+            self.db.data['projects']['default']['volumes'][0]['IPAcl'],
+            {'values': ['ALLOW_ANY']})
 
         self.driver.delete_volume(volume)
         db.volume_destroy(self.ctxt, volume.id)
@@ -668,6 +764,10 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
         def send_cmd_mock(cmd, **kwargs):
             if cmd == "create_volume":
                 project_name = kwargs["project_name"]
+                ipacl = (
+                    {'values': ['ALLOW_NONE']}
+                    if self.driver.configuration.lightos_use_ipacl
+                    else {'values': ['ALLOW_ANY']})
                 volume = {
                     "project_name": project_name,
                     "name": kwargs["name"],
@@ -676,6 +776,7 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
                     "compression": kwargs["compression"],
                     "src_snapshot_name": kwargs["src_snapshot_name"],
                     "acl": {'values': kwargs.get('acl')},
+                    "IPAcl": ipacl,
                     "state": "Migrating",
                 }
                 volume["ETag"] = get_vol_etag(volume)
@@ -888,7 +989,7 @@ class LightOSStorageVolumeDriverTest(test.TestCase):
         assert volumes_data['reserved_percentage'] == RESERVED_PERCENTAGE, \
             "Expected %d, received %s" % \
             (RESERVED_PERCENTAGE, volumes_data['reserved_percentage'])
-        assert volumes_data['QoS_support'] is False, \
+        assert volumes_data['QoS_support'] is True, \
             "Expected False, received %s" % volumes_data['QoS_support']
         assert volumes_data['online_extend_support'] is True, \
             "Expected True, received %s" % \

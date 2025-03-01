@@ -15,12 +15,10 @@
 
 """Manage backends in the current zone."""
 
-from __future__ import annotations
-
 from collections import abc
 import random
 import typing
-from typing import (Any, Iterable, Optional, Type, Union)  # noqa: H301
+from typing import (Any, Iterable, Optional, Type, Union)
 
 from oslo_config import cfg
 from oslo_log import log as logging
@@ -313,11 +311,11 @@ class BackendState(object):
             pool_cap['timestamp'] = self.updated
 
         self.capabilities = typing.cast(ReadOnlyDict, self.capabilities)
-        if('filter_function' not in pool_cap and
+        if ('filter_function' not in pool_cap and
                 'filter_function' in self.capabilities):
             pool_cap['filter_function'] = self.capabilities['filter_function']
 
-        if('goodness_function' not in pool_cap and
+        if ('goodness_function' not in pool_cap and
                 'goodness_function' in self.capabilities):
             pool_cap['goodness_function'] = (
                 self.capabilities['goodness_function'])
@@ -447,6 +445,7 @@ class PoolState(BackendState):
             self.filter_function = capability.get('filter_function', None)
             self.goodness_function = capability.get('goodness_function', 0)
 
+    @typing.no_type_check
     def update_pools(self, capability):
         # Do nothing, since we don't have pools within pool, yet
         pass
@@ -990,12 +989,26 @@ class HostManager(object):
         # we just convert them into string to compare them.
         return str(value) == str(capability)
 
-    def get_backup_host(self, volume: objects.Volume, driver=None) -> str:
+    def get_az(self,
+               volume: objects.Volume,
+               availability_zone: Union[str, None]) -> Union[str, None]:
+        if availability_zone:
+            az = availability_zone
+        elif volume:
+            az = volume.availability_zone
+        else:
+            az = None
+        return az
+
+    def get_backup_host(self,
+                        volume: objects.Volume,
+                        availability_zone: Union[str, None],
+                        driver=None) -> str:
         if volume:
             volume_host = volume_utils.extract_host(volume.host, 'host')
         else:
             volume_host = None
-        az = volume.availability_zone if volume else None
+        az = self.get_az(volume, availability_zone)
         return self._get_available_backup_service_host(volume_host, az, driver)
 
     def _get_any_available_backup_service(self, availability_zone,

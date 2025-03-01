@@ -21,7 +21,6 @@ from time import time
 from oslo_log import log as logging
 from oslo_utils import excutils
 from oslo_utils import units
-import six
 
 from cinder import exception
 from cinder.i18n import _
@@ -64,8 +63,7 @@ SSC_API_MAP = {
 }
 
 
-@six.add_metaclass(volume_utils.TraceWrapperMetaclass)
-class RestClient(object):
+class RestClient(object, metaclass=volume_utils.TraceWrapperMetaclass):
 
     def __init__(self, **kwargs):
 
@@ -450,7 +448,7 @@ class RestClient(object):
         aggregate = None
         if unique_volume['style'] == 'flexvol':
             # flexvol has only 1 aggregate
-            aggregate = unique_volume['aggregates'][0]['name']
+            aggregate = [unique_volume['aggregates'][0]['name']]
         else:
             aggregate = [aggr["name"]
                          for aggr in unique_volume.get('aggregates', [])]
@@ -663,6 +661,7 @@ class RestClient(object):
             'svm.name': self.vserver,
             'fields': 'svm.name,location.volume.name,space.size,'
                       'location.qtree.name,name,os_type,'
+                      'space.scsi_thin_provisioning_support_enabled,'
                       'space.guarantee.requested,uuid'
         }
 
@@ -683,6 +682,8 @@ class RestClient(object):
             lun_info['Path'] = lun['name']
             lun_info['OsType'] = lun['os_type']
             lun_info['SpaceReserved'] = lun['space']['guarantee']['requested']
+            lun_info['SpaceAllocated'] = \
+                lun['space']['scsi_thin_provisioning_support_enabled']
             lun_info['UUID'] = lun['uuid']
 
             lun_list.append(lun_info)
@@ -695,6 +696,7 @@ class RestClient(object):
         query = {
             'fields': 'svm.name,location.volume.name,space.size,'
                       'location.qtree.name,name,os_type,'
+                      'space.scsi_thin_provisioning_support_enabled,'
                       'space.guarantee.requested,uuid'
         }
 
@@ -723,6 +725,8 @@ class RestClient(object):
             lun_info['Path'] = lun['name']
             lun_info['OsType'] = lun['os_type']
             lun_info['SpaceReserved'] = lun['space']['guarantee']['requested']
+            lun_info['SpaceAllocated'] = \
+                lun['space']['scsi_thin_provisioning_support_enabled']
             lun_info['UUID'] = lun['uuid']
 
             # NOTE(nahimsouza): Currently, ONTAP REST API does not have the
@@ -1305,13 +1309,15 @@ class RestClient(object):
 
         path = f'/vol/{volume_name}/{lun_name}'
         space_reservation = metadata['SpaceReserved']
+        space_allocation = metadata['SpaceAllocated']
         initial_size = size
 
         body = {
             'name': path,
             'space.size': str(initial_size),
             'os_type': metadata['OsType'],
-            'space.guarantee.requested': space_reservation
+            'space.guarantee.requested': space_reservation,
+            'space.scsi_thin_provisioning_support_enabled': space_allocation
         }
 
         if qos_policy_group_name:
@@ -1956,7 +1962,7 @@ class RestClient(object):
                          destination_vserver=None, destination_volume=None):
 
         fields = ['state', 'source.svm.name', 'source.path',
-                  'destination.svm.name', 'destination.path',
+                  'destination.svm.name', 'destination.path', 'transfer.state',
                   'transfer.end_time', 'lag_time', 'healthy', 'uuid']
 
         query = {}
@@ -1976,7 +1982,11 @@ class RestClient(object):
         snapmirrors = []
         for record in response.get('records', []):
             snapmirrors.append({
-                'relationship-status': record.get('state'),
+                'relationship-status': (
+                    'idle'
+                    if record.get('state') == 'snapmirrored'
+                    else record.get('state')),
+                'transferring-state': record.get('transfer', {}).get('state'),
                 'mirror-state': record['state'],
                 'source-vserver': record['source']['svm']['name'],
                 'source-volume': (record['source']['path'].split(':')[1] if
@@ -2070,11 +2080,11 @@ class RestClient(object):
         result = self.send_request('/snapmirror/relationships/' + uuid,
                                    'patch', body=body,
                                    wait_on_accepted=wait_result)
-        job = result['job']
+
         job_info = {
             'operation-id': None,
             'status': None,
-            'jobid': job.get('uuid'),
+            'jobid': result.get('job', {}).get('uuid'),
             'error-code': None,
             'error-message': None,
             'relationship-uuid': uuid,
@@ -2247,9 +2257,39 @@ class RestClient(object):
                          destination_vserver, destination_volume):
         """Breaks a data protection SnapMirror relationship."""
 
-        self._set_snapmirror_state(
-            'broken-off', source_vserver, source_volume,
-            destination_vserver, destination_volume)
+        interval = 2
+        retries = (10 / interval)
+
+        @utils.retry(netapp_api.NaRetryableError, interval=interval,
+                     retries=retries, backoff_rate=1)
+        def _waiter():
+            snapmirror = self.get_snapmirrors(
+                source_vserver=source_vserver,
+                source_volume=source_volume,
+                destination_vserver=destination_vserver,
+                destination_volume=destination_volume)
+
+            snapmirror_state = None
+            if snapmirror:
+                snapmirror_state = snapmirror[0].get('transferring-state')
+
+            if snapmirror_state == 'success':
+                uuid = snapmirror[0]['uuid']
+                body = {'state': 'broken_off'}
+                self.send_request(f'/snapmirror/relationships/{uuid}', 'patch',
+                                  body=body)
+                return
+            else:
+                message = 'Waiting for transfer state to be SUCCESS.'
+                code = ''
+                raise netapp_api.NaRetryableError(message=message, code=code)
+
+        try:
+            return _waiter()
+        except netapp_api.NaRetryableError:
+            msg = _("Transfer state did not reach the expected state. Retries "
+                    "exhausted. Aborting.")
+            raise na_utils.NetAppDriverException(msg)
 
     def update_snapmirror(self, source_vserver, source_volume,
                           destination_vserver, destination_volume):

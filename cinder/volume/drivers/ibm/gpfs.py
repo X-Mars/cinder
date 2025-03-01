@@ -436,13 +436,13 @@ class GPFSDriver(driver.CloneableImageVD,
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
-        if(self.configuration.gpfs_images_share_mode and
+        if (self.configuration.gpfs_images_share_mode and
            self.configuration.gpfs_images_dir is None):
             msg = _('Option gpfs_images_dir is not set correctly.')
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
-        if(self.configuration.gpfs_images_share_mode == 'copy_on_write' and
+        if (self.configuration.gpfs_images_share_mode == 'copy_on_write' and
            not self._same_filesystem(self.configuration.gpfs_mount_point_base,
                                      self.configuration.gpfs_images_dir)):
             msg = (_('gpfs_images_share_mode is set to copy_on_write, but '
@@ -453,7 +453,7 @@ class GPFSDriver(driver.CloneableImageVD,
             LOG.error(msg)
             raise exception.VolumeBackendAPIException(data=msg)
 
-        if(self.configuration.gpfs_images_share_mode == 'copy_on_write' and
+        if (self.configuration.gpfs_images_share_mode == 'copy_on_write' and
            not self._is_same_fileset(self.configuration.gpfs_mount_point_base,
                                      self.configuration.gpfs_images_dir)):
             msg = (_('gpfs_images_share_mode is set to copy_on_write, but '
@@ -884,8 +884,8 @@ class GPFSDriver(driver.CloneableImageVD,
 
     def _is_cloneable(self, image_id):
         """Return true if the specified image can be cloned by GPFS."""
-        if not((self.configuration.gpfs_images_dir and
-                self.configuration.gpfs_images_share_mode)):
+        if not ((self.configuration.gpfs_images_dir and
+                 self.configuration.gpfs_images_share_mode)):
             reason = 'glance repository not configured to use GPFS'
             return False, reason, None
 
@@ -949,7 +949,8 @@ class GPFSDriver(driver.CloneableImageVD,
 
         return {'provider_location': None}, True
 
-    def copy_image_to_volume(self, context, volume, image_service, image_id):
+    def copy_image_to_volume(self, context, volume, image_service, image_id,
+                             disable_sparse=False):
         """Fetch the image from image_service and write it to the volume.
 
         Note that cinder.volume.flows.create_volume will attempt to use
@@ -966,7 +967,8 @@ class GPFSDriver(driver.CloneableImageVD,
         image_utils.fetch_to_raw(context, image_service, image_id,
                                  self.local_path(volume),
                                  self.configuration.volume_dd_blocksize,
-                                 size=volume['size'])
+                                 size=volume['size'],
+                                 disable_sparse=disable_sparse)
         self._resize_volume_file(volume, volume['size'])
 
     def _resize_volume_file(self, volume, new_size):

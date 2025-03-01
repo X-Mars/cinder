@@ -63,6 +63,14 @@ class PowerMaxRestTest(test.TestCase):
         self.assertRaises(requests.exceptions.Timeout,
                           self.rest.request, '', 'TIMEOUT')
 
+    def test_rest_request_read_timeout_exception(self):
+        self.assertRaises(requests.exceptions.ReadTimeout,
+                          self.rest.request, '', 'READTIMEOUT', (60, 60))
+
+    def test_rest_request_connect_timeout_exception(self):
+        self.assertRaises(requests.exceptions.ConnectTimeout,
+                          self.rest.request, '', 'CONNECTTIMEOUT', (60, 60))
+
     def test_rest_request_connection_exception(self):
         self.assertRaises(requests.exceptions.ConnectionError,
                           self.rest.request, '', 'CONNECTION')
@@ -861,10 +869,10 @@ class PowerMaxRestTest(test.TestCase):
     def test_find_mv_connections_for_vol_missing_host_lun_address(self):
         with mock.patch.object(self.rest, 'get_resource',
                                return_value=self.data.maskingview_no_lun):
-            host_lun_id = self.rest.find_mv_connections_for_vol(
-                self.data.array, self.data.masking_view_name_f,
-                self.data.device_id)
-            self.assertIsNone(host_lun_id)
+            self.assertRaises(exception.VolumeBackendAPIException,
+                              self.rest.find_mv_connections_for_vol,
+                              self.data.array, self.data.masking_view_name_f,
+                              self.data.device_id)
 
     def test_find_mv_connections_for_vol_failed(self):
         # no masking view info retrieved
@@ -875,9 +883,10 @@ class PowerMaxRestTest(test.TestCase):
         # no connection info received
         with mock.patch.object(self.rest, 'get_resource',
                                return_value={'no_conn': 'no_info'}):
-            host_lun_id2 = self.rest.find_mv_connections_for_vol(
-                self.data.array, self.data.masking_view_name_f, device_id)
-            self.assertIsNone(host_lun_id2)
+            self.assertRaises(exception.VolumeBackendAPIException,
+                              self.rest.find_mv_connections_for_vol,
+                              self.data.array, self.data.masking_view_name_f,
+                              self.data.device_id)
 
     def test_get_storage_groups_from_volume(self):
         array = self.data.array
@@ -2428,6 +2437,27 @@ class PowerMaxRestTest(test.TestCase):
             self.assertTrue(valid_version)
         request_count = mock_req.call_count
         self.assertEqual(1, request_count)
+
+    def test_validate_unisphere_version_101(self):
+        version = 'T10.1.0.501'
+        returned_version = {'version': version}
+        with mock.patch.object(self.rest, "request",
+                               return_value=(200,
+                                             returned_version)) as mock_req:
+            valid_version = self.rest.validate_unisphere_version()
+            self.assertTrue(valid_version)
+            self.assertEqual(self.rest.u4p_version, rest.U4P_100_VERSION)
+        request_count = mock_req.call_count
+        self.assertEqual(1, request_count)
+
+    def test_validate_unisphere_version_110(self):
+        version = 'T11.1.0.501'
+        returned_version = {'version': version}
+        with mock.patch.object(self.rest, "request",
+                               return_value=(200,
+                                             returned_version)):
+            self.assertRaises(exception.InvalidConfigurationValue,
+                              self.rest.validate_unisphere_version)
 
     @mock.patch.object(rest.PowerMaxRest, '_build_uri_kwargs')
     @mock.patch.object(rest.PowerMaxRest, '_build_uri_legacy_args')

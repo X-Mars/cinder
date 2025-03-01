@@ -18,8 +18,6 @@ from copy import deepcopy
 import time
 from unittest import mock
 
-import six
-
 from cinder import exception
 from cinder.objects import fields
 from cinder.tests.unit import fake_constants as fake
@@ -197,7 +195,7 @@ class PowerMaxCommonTest(test.TestCase):
                       'device-meta-key-2': 'device-meta-value-2'})
     def test_create_volume(self, mck_meta):
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.provider_location),
+            {'provider_location': str(self.data.provider_location),
              'metadata': {'device-meta-key-1': 'device-meta-value-1',
                           'device-meta-key-2': 'device-meta-value-2',
                           'user-meta-key-1': 'user-meta-value-1',
@@ -212,7 +210,7 @@ class PowerMaxCommonTest(test.TestCase):
                        return_value=tpd.PowerMaxData.volume_metadata)
     def test_create_volume_qos(self, mck_meta):
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.provider_location),
+            {'provider_location': str(self.data.provider_location),
              'metadata': self.data.volume_metadata})
         extra_specs = deepcopy(self.data.extra_specs_intervals_set)
         extra_specs['qos'] = {
@@ -226,7 +224,7 @@ class PowerMaxCommonTest(test.TestCase):
     @mock.patch.object(common.PowerMaxCommon, 'get_volume_metadata',
                        return_value='')
     def test_create_volume_from_snapshot(self, mck_meta, mck_cleanup_snaps):
-        ref_model_update = ({'provider_location': six.text_type(
+        ref_model_update = ({'provider_location': str(
             deepcopy(self.data.provider_location_snapshot))})
         model_update = self.common.create_volume_from_snapshot(
             self.data.test_clone_volume, self.data.test_snapshot)
@@ -236,7 +234,7 @@ class PowerMaxCommonTest(test.TestCase):
 
         # Test from legacy snapshot
         ref_model_update = (
-            {'provider_location': six.text_type(
+            {'provider_location': str(
                 deepcopy(self.data.provider_location_clone))})
         model_update = self.common.create_volume_from_snapshot(
             self.data.test_clone_volume, self.data.test_legacy_snapshot)
@@ -368,7 +366,7 @@ class PowerMaxCommonTest(test.TestCase):
         test_volume = self.data.test_clone_volume
         source_device_id = self.data.device_id
         extra_specs = self.common._initial_setup(test_volume)
-        ref_model_update = ({'provider_location': six.text_type(
+        ref_model_update = ({'provider_location': str(
             self.data.provider_location_clone)})
         model_update = self.common.create_cloned_volume(
             self.data.test_clone_volume, self.data.test_volume)
@@ -425,7 +423,7 @@ class PowerMaxCommonTest(test.TestCase):
                       'snap-meta-key-2': 'snap-meta-value-2'})
     def test_create_snapshot(self, mck_meta, mck_cleanup_snaps):
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.snap_location),
+            {'provider_location': str(self.data.snap_location),
              'metadata': {'snap-meta-key-1': 'snap-meta-value-1',
                           'snap-meta-key-2': 'snap-meta-value-2',
                           'user-meta-key-1': 'user-meta-value-1',
@@ -2000,7 +1998,7 @@ class PowerMaxCommonTest(test.TestCase):
     def test_manage_existing_success(self, mck_meta):
         external_ref = {u'source-name': u'00002'}
         provider_location = {'device_id': u'00002', 'array': u'000197800123'}
-        ref_update = {'provider_location': six.text_type(provider_location),
+        ref_update = {'provider_location': str(provider_location),
                       'metadata': {'device-meta-key-1': 'device-meta-value-1',
                                    'device-meta-key-2': 'device-meta-value-2',
                                    'user-meta-key-1': 'user-meta-value-1',
@@ -2939,7 +2937,7 @@ class PowerMaxCommonTest(test.TestCase):
         group = self.data.test_group_1
         add_vols = []
         remove_vols = [self.data.test_volume_group_member]
-        self.mock_object(self.common, 'failover', True)
+        self.mock_object(self.common, 'failedover', True)
         self.assertRaises(
             exception.VolumeBackendAPIException, self.common.update_group,
             group, add_vols, remove_vols)
@@ -3219,7 +3217,8 @@ class PowerMaxCommonTest(test.TestCase):
             {'RestServerIp': '1.1.1.1', 'RestServerPort': 8443,
              'RestUserName': 'smc', 'RestPassword': 'smc', 'SSLVerify': False,
              'SerialNumber': self.data.array, 'srpName': 'SRP_1',
-             'PortGroup': [self.data.port_group_name_i]})
+             'PortGroup': [self.data.port_group_name_i],
+             'RestAPIConnectTimeout': 30, 'RestAPIReadTimeout': 30})
         old_conf = tpfo.FakeConfiguration(None, 'CommonTests', 1, 1)
         configuration = tpfo.FakeConfiguration(
             None, 'CommonTests', 1, 1, san_ip='1.1.1.1', san_login='smc',
@@ -3238,7 +3237,8 @@ class PowerMaxCommonTest(test.TestCase):
             {'RestServerIp': '1.1.1.1', 'RestServerPort': 3448,
              'RestUserName': 'smc', 'RestPassword': 'smc', 'SSLVerify': False,
              'SerialNumber': self.data.array, 'srpName': 'SRP_1',
-             'PortGroup': [self.data.port_group_name_i]})
+             'PortGroup': [self.data.port_group_name_i],
+             'RestAPIConnectTimeout': 30, 'RestAPIReadTimeout': 30})
         configuration = tpfo.FakeConfiguration(
             None, 'CommonTests', 1, 1, san_ip='1.1.1.1', san_login='smc',
             powermax_array=self.data.array, powermax_srp='SRP_1',
@@ -3253,7 +3253,8 @@ class PowerMaxCommonTest(test.TestCase):
             {'RestServerIp': '1.1.1.1', 'RestServerPort': 8443,
              'RestUserName': 'smc', 'RestPassword': 'smc', 'SSLVerify': False,
              'SerialNumber': self.data.array, 'srpName': 'SRP_1',
-             'PortGroup': [self.data.port_group_name_i]})
+             'PortGroup': [self.data.port_group_name_i],
+             'RestAPIConnectTimeout': 30, 'RestAPIReadTimeout': 30})
         configuration = tpfo.FakeConfiguration(
             None, 'CommonTests', 1, 1, san_ip='1.1.1.1', san_login='smc',
             powermax_array=self.data.array, powermax_srp='SRP_1',
@@ -3311,7 +3312,7 @@ class PowerMaxCommonTest(test.TestCase):
         prov_loc = {'source_id': self.data.device_id,
                     'snap_name': 'OS-%s' % existing_ref['source-name']}
         updates = {'display_name': 'my_snap',
-                   'provider_location': six.text_type(prov_loc),
+                   'provider_location': str(prov_loc),
                    'metadata': {'snap-meta-key-1': 'snap-meta-value-1',
                                 'snap-meta-key-2': 'snap-meta-value-2',
                                 'user-meta-key-1': 'user-meta-value-1',
@@ -3608,7 +3609,8 @@ class PowerMaxCommonTest(test.TestCase):
             'RestServerIp': '1.1.1.1', 'RestServerPort': 8443,
             'RestUserName': 'smc', 'RestPassword': 'smc', 'SSLVerify': False,
             'SerialNumber': '000197800123', 'srpName': 'SRP_1',
-            'PortGroup': ['OS-fibre-PG']}
+            'PortGroup': ['OS-fibre-PG'],
+            'RestAPIConnectTimeout': 30, 'RestAPIReadTimeout': 30}
 
         self.mock_object(self.common.configuration, 'powermax_service_level',
                          None)
@@ -3664,7 +3666,9 @@ class PowerMaxCommonTest(test.TestCase):
                 'RestServerIp': '1.1.1.1', 'RestServerPort': 8443,
                 'RestUserName': 'test', 'RestPassword': 'test',
                 'SerialNumber': '000197800123', 'srpName': 'SRP_1',
-                'PortGroup': None, 'SSLVerify': True}}
+                'PortGroup': None,
+                'RestAPIConnectTimeout': 30, 'RestAPIReadTimeout': 30,
+                'SSLVerify': True}}
         self.mock_object(self.common, 'configuration', configuration)
         self.common._get_u4p_failover_info()
         self.assertIsNotNone(self.rest.u4p_failover_targets)
@@ -3988,7 +3992,7 @@ class PowerMaxCommonTest(test.TestCase):
         ref_metadata = {'SnapshotLabel': snap_name,
                         'SourceDeviceID': device_id,
                         'SourceDeviceLabel': device_label,
-                        'SnapIdList': six.text_type(self.data.snap_id),
+                        'SnapIdList': str(self.data.snap_id),
                         'is_snap_id': True}
 
         act_metadata = self.common.get_snapshot_metadata(
@@ -4004,7 +4008,7 @@ class PowerMaxCommonTest(test.TestCase):
         snap_name = self.data.test_snapshot_snap_name
         ref_metadata = {'SnapshotLabel': snap_name,
                         'SourceDeviceID': device_id,
-                        'SnapIdList': six.text_type(self.data.snap_id),
+                        'SnapIdList': str(self.data.snap_id),
                         'is_snap_id': True}
 
         act_metadata = self.common.get_snapshot_metadata(
@@ -4012,10 +4016,10 @@ class PowerMaxCommonTest(test.TestCase):
         self.assertEqual(ref_metadata, act_metadata)
 
     def test_update_metadata(self):
-        model_update = {'provider_location': six.text_type(
+        model_update = {'provider_location': str(
             self.data.provider_location)}
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.provider_location),
+            {'provider_location': str(self.data.provider_location),
              'metadata': {'device-meta-key-1': 'device-meta-value-1',
                           'device-meta-key-2': 'device-meta-value-2',
                           'user-meta-key-1': 'user-meta-value-1',
@@ -4050,10 +4054,10 @@ class PowerMaxCommonTest(test.TestCase):
         self.assertEqual(ref_model_update, model_update)
 
     def test_update_metadata_no_existing_metadata(self):
-        model_update = {'provider_location': six.text_type(
+        model_update = {'provider_location': str(
             self.data.provider_location)}
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.provider_location),
+            {'provider_location': str(self.data.provider_location),
              'metadata': {'device-meta-key-1': 'device-meta-value-1',
                           'device-meta-key-2': 'device-meta-value-2'}})
 
@@ -4067,10 +4071,10 @@ class PowerMaxCommonTest(test.TestCase):
         self.assertEqual(ref_model_update, model_update)
 
     def test_update_metadata_no_object_metadata(self):
-        model_update = {'provider_location': six.text_type(
+        model_update = {'provider_location': str(
             self.data.provider_location)}
         ref_model_update = (
-            {'provider_location': six.text_type(self.data.provider_location),
+            {'provider_location': str(self.data.provider_location),
              'metadata': {'user-meta-key-1': 'user-meta-value-1',
                           'user-meta-key-2': 'user-meta-value-2'}})
 
@@ -4084,7 +4088,7 @@ class PowerMaxCommonTest(test.TestCase):
         self.assertEqual(ref_model_update, model_update)
 
     def test_update_metadata_model_list_exception(self):
-        model_update = [{'provider_location': six.text_type(
+        model_update = [{'provider_location': str(
             self.data.provider_location)}]
 
         existing_metadata = None
@@ -4841,3 +4845,58 @@ class PowerMaxCommonTest(test.TestCase):
                 self.data.remote_array, self.data.srp, 'Diamond', 'DSS',
                 self.data.rep_extra_specs_rep_config, False, is_re=True,
                 rep_mode='Synchronous')
+
+    def test_get_connect_timeout_from_cinder_config(self):
+        kwargs_expected = (
+            {'RestServerIp': '1.1.1.1', 'RestServerPort': 3448,
+             'RestUserName': 'smc', 'RestPassword': 'smc', 'SSLVerify': False,
+             'SerialNumber': self.data.array, 'srpName': 'SRP_1',
+             'PortGroup': [self.data.port_group_name_i],
+             'RestAPIConnectTimeout': 120, 'RestAPIReadTimeout': 30})
+        configuration = tpfo.FakeConfiguration(
+            None, 'CommonTests',
+            1, 1, san_ip='1.1.1.1', san_login='smc',
+            powermax_array=self.data.array, powermax_srp='SRP_1',
+            san_password='smc', san_api_port=3448,
+            powermax_port_groups=[self.data.port_group_name_i])
+        configuration.set_rest_api_connect_timeout(120)
+        self.mock_object(self.common, 'configuration', configuration)
+        kwargs_returned = self.common.get_attributes_from_cinder_config()
+        self.assertEqual(kwargs_expected, kwargs_returned)
+
+    def test_get_read_timeout_from_cinder_config(self):
+        kwargs_expected = (
+            {'RestServerIp': '1.1.1.1', 'RestServerPort': 3448,
+             'RestUserName': 'smc', 'RestPassword': 'smc', 'SSLVerify': False,
+             'SerialNumber': self.data.array, 'srpName': 'SRP_1',
+             'PortGroup': [self.data.port_group_name_i],
+             'RestAPIConnectTimeout': 30, 'RestAPIReadTimeout': 120})
+        configuration = tpfo.FakeConfiguration(
+            None, 'CommonTests',
+            1, 1, san_ip='1.1.1.1', san_login='smc',
+            powermax_array=self.data.array, powermax_srp='SRP_1',
+            san_password='smc', san_api_port=3448,
+            powermax_port_groups=[self.data.port_group_name_i])
+        configuration.set_rest_api_read_timeout(120)
+        self.mock_object(self.common, 'configuration', configuration)
+        kwargs_returned = self.common.get_attributes_from_cinder_config()
+        self.assertEqual(kwargs_expected, kwargs_returned)
+
+    def test_get_connect_and_read_timeout_from_cinder_config(self):
+        kwargs_expected = (
+            {'RestServerIp': '1.1.1.1', 'RestServerPort': 3448,
+             'RestUserName': 'smc', 'RestPassword': 'smc', 'SSLVerify': False,
+             'SerialNumber': self.data.array, 'srpName': 'SRP_1',
+             'PortGroup': [self.data.port_group_name_i],
+             'RestAPIConnectTimeout': 90, 'RestAPIReadTimeout': 90})
+        configuration = tpfo.FakeConfiguration(
+            None, 'CommonTests',
+            1, 1, san_ip='1.1.1.1', san_login='smc',
+            powermax_array=self.data.array, powermax_srp='SRP_1',
+            san_password='smc', san_api_port=3448,
+            powermax_port_groups=[self.data.port_group_name_i])
+        configuration.set_rest_api_connect_timeout(90)
+        configuration.set_rest_api_read_timeout(90)
+        self.mock_object(self.common, 'configuration', configuration)
+        kwargs_returned = self.common.get_attributes_from_cinder_config()
+        self.assertEqual(kwargs_expected, kwargs_returned)

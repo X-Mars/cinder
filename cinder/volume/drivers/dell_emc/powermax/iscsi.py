@@ -20,9 +20,9 @@ import random
 
 from oslo_log import log as logging
 from oslo_utils import strutils
-import six
 
 from cinder.common import constants
+from cinder import coordination
 from cinder import exception
 from cinder.i18n import _
 from cinder import interface
@@ -138,12 +138,18 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
               - Support for Failover Abilities (bp/powermax-failover-abilities)
         4.4.0 - Early check for status of port
         4.4.1 - Report trim/discard support
+        4.5.0 - Add PowerMax v4 support
+        4.5.1 - Add active/active compliance
+        4.5.2 - Add 'disable_protected_snap' option
     """
 
-    VERSION = "4.4.1"
+    VERSION = "4.5.2"
+    SUPPORTS_ACTIVE_ACTIVE = True
 
     # ThirdPartySystems wiki
     CI_WIKI_NAME = "DellEMC_PowerMAX_CI"
+
+    driver_prefix = 'powermax'
 
     def __init__(self, *args, **kwargs):
 
@@ -168,6 +174,9 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
 
     def check_for_setup_error(self):
         pass
+
+    def _init_vendor_properties(self):
+        return self.common.get_vendor_properties(self)
 
     def create_volume(self, volume):
         """Creates a PowerMax/VMAX volume.
@@ -253,8 +262,8 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
         :param context: the context
         :param volume_id: the volume id
         """
-        pass
 
+    @coordination.synchronized('{self.driver_prefix}-{volume.id}')
     def initialize_connection(self, volume, connector):
         """Initializes the connection and returns connection info.
 
@@ -316,7 +325,7 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
         except KeyError as e:
             exception_message = (_("Cannot get iSCSI ipaddresses, multipath "
                                    "flag, or hostlunid. Exception is %(e)s.")
-                                 % {'e': six.text_type(e)})
+                                 % {'e': str(e)})
             raise exception.VolumeBackendAPIException(
                 message=exception_message)
 
@@ -435,6 +444,7 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
 
         return properties
 
+    @coordination.synchronized('{self.driver_prefix}-{volume.id}')
     def terminate_connection(self, volume, connector, **kwargs):
         """Disallow connection from connector.
 
@@ -459,15 +469,15 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
         data['driver_version'] = self.VERSION
         self._stats = data
 
-    def manage_existing(self, volume, external_ref):
+    def manage_existing(self, volume, existing_ref):
         """Manages an existing PowerMax/VMAX Volume (import to Cinder).
 
         Renames the Volume to match the expected name for the volume.
         Also need to consider things like QoS, Emulation, account/tenant.
         """
-        return self.common.manage_existing(volume, external_ref)
+        return self.common.manage_existing(volume, existing_ref)
 
-    def manage_existing_get_size(self, volume, external_ref):
+    def manage_existing_get_size(self, volume, existing_ref):
         """Return size of an existing PowerMax/VMAX volume to manage_existing.
 
         :param self: reference to class
@@ -475,7 +485,7 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
         :param external_ref: reference to the existing volume
         :returns: size of the volume in GB
         """
-        return self.common.manage_existing_get_size(volume, external_ref)
+        return self.common.manage_existing_get_size(volume, existing_ref)
 
     def unmanage(self, volume):
         """Export PowerMax/VMAX volume from Cinder.
@@ -548,10 +558,10 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
         return self.common.get_manageable_snapshots(marker, limit, offset,
                                                     sort_keys, sort_dirs)
 
-    def retype(self, ctxt, volume, new_type, diff, host):
+    def retype(self, context, volume, new_type, diff, host):
         """Migrate volume to another host using retype.
 
-        :param ctxt: context
+        :param context: context
         :param volume: the volume object including the volume_type_id
         :param new_type: the new volume type.
         :param diff: difference between old and new volume types.
@@ -572,7 +582,18 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
         :param groups: replication groups
         :returns: secondary_id, volume_update_list, group_update_list
         """
-        return self.common.failover_host(volumes, secondary_id, groups)
+        active_backend_id, volume_update_list, group_update_list = (
+            self.common.failover(volumes, secondary_id, groups))
+        self.common.failover_completed(secondary_id, False)
+        return active_backend_id, volume_update_list, group_update_list
+
+    def failover(self, context, volumes, secondary_id=None, groups=None):
+        """Like failover but for a host that is clustered."""
+        return self.common.failover(volumes, secondary_id, groups)
+
+    def failover_completed(self, context, active_backend_id=None):
+        """This method is called after failover for clustered backends."""
+        return self.common.failover_completed(active_backend_id, True)
 
     def create_group(self, context, group):
         """Creates a generic volume group.
@@ -683,3 +704,7 @@ class PowerMaxISCSIDriver(san.SanISCSIDriver):
         :param snapshot: the cinder snapshot object
         """
         self.common.revert_to_snapshot(volume, snapshot)
+
+    @classmethod
+    def clean_volume_file_locks(cls, volume_id):
+        coordination.synchronized_remove(f'{cls.driver_prefix}-{volume_id}')

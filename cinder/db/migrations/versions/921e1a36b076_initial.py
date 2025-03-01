@@ -44,7 +44,6 @@ CONF = cfg.CONF
 CONF.import_opt('quota_volumes', 'cinder.quota')
 CONF.import_opt('quota_snapshots', 'cinder.quota')
 CONF.import_opt('quota_gigabytes', 'cinder.quota')
-CONF.import_opt('quota_consistencygroups', 'cinder.quota')
 
 CLASS_NAME = 'default'
 CREATED_AT = datetime.datetime.now()  # noqa
@@ -919,19 +918,19 @@ def upgrade():
             "image_volume_cache_entries",
         ]
 
-        connection.execute("SET foreign_key_checks = 0")
+        op.execute("SET foreign_key_checks = 0")
 
         for table in tables:
-            connection.execute(
+            op.execute(
                 "ALTER TABLE %s CONVERT TO CHARACTER SET utf8" % table
             )
 
-        connection.execute("SET foreign_key_checks = 1")
-        connection.execute(
+        op.execute("SET foreign_key_checks = 1")
+        op.execute(
             "ALTER DATABASE %s DEFAULT CHARACTER SET utf8"
             % connection.engine.url.database
         )
-        connection.execute("ALTER TABLE %s Engine=InnoDB" % table)
+        op.execute("ALTER TABLE %s Engine=InnoDB" % table)
 
     # This is only necessary for mysql, and since the table is not in use this
     # will only be a schema update.
@@ -992,13 +991,6 @@ def upgrade():
                 'class_name': CLASS_NAME,
                 'resource': 'gigabytes',
                 'hard_limit': CONF.quota_gigabytes,
-                'deleted': False,
-            },
-            {
-                'created_at': CREATED_AT,
-                'class_name': CLASS_NAME,
-                'resource': 'consistencygroups',
-                'hard_limit': CONF.quota_consistencygroups,
                 'deleted': False,
             },
             {

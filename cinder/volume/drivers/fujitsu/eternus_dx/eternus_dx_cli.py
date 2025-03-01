@@ -15,10 +15,10 @@
 #
 
 """Cinder Volume driver for Fujitsu ETERNUS DX S3 series."""
-import six
 
 from cinder.i18n import _
 from cinder import ssh_utils
+from cinder.volume.drivers.fujitsu.eternus_dx import constants as CONSTANTS
 
 
 class FJDXCLI(object):
@@ -46,14 +46,19 @@ class FJDXCLI(object):
         self.ce_support = False
         self.CMD_dic = {
             'check_user_role': self._check_user_role,
+            'expand_volume': self._expand_volume,
             'show_pool_provision': self._show_pool_provision,
+            'show_qos_bandwidth_limit': self._show_qos_bandwidth_limit,
+            'set_qos_bandwidth_limit': self._set_qos_bandwidth_limit,
+            'set_volume_qos': self._set_volume_qos,
+            'show_copy_sessions': self._show_copy_sessions,
+            'show_volume_qos': self._show_volume_qos,
+            'show_enclosure_status': self._show_enclosure_status,
+            'start_copy_snap_opc': self._start_copy_snap_opc,
+            'stop_copy_session': self._stop_copy_session,
+            'start_copy_opc': self._start_copy_opc,
+            'delete_volume': self._delete_volume
         }
-
-        self.SMIS_dic = {
-            '0000': '0',  # Success.
-            '0060': '32787',  # The device is in busy state.
-            '0100': '4097'
-        }  # Size not supported.
 
     def done(self, command, **option):
         func = self.CMD_dic.get(command, self._default_func)
@@ -95,7 +100,7 @@ class FJDXCLI(object):
                    'stdoutlist': stdoutlist})
 
         if status == 0:
-            rc = '0'
+            rc = str(CONSTANTS.RC_OK)
             for outline in stdoutlist[lineno:]:
                 if 0 <= outline.find('CLI>'):
                     continue
@@ -114,8 +119,11 @@ class FJDXCLI(object):
                 if outline is None:
                     continue
                 output.append(outline)
-
-            rc, message = self._create_error_message(code, output)
+            if cmd != "show cli-error-code":
+                rc, message = self._create_error_message(code, output)
+            else:
+                rc = 'E' + code
+                message = output
 
         return {'result': 0, 'rc': rc, 'message': message}
 
@@ -129,7 +137,7 @@ class FJDXCLI(object):
             stdoutdata = ''
             while True:
                 temp = chan.recv(65535)
-                if isinstance(temp, six.binary_type):
+                if isinstance(temp, bytes):
                     temp = temp.decode('utf-8')
                 else:
                     temp = str(temp)
@@ -143,29 +151,36 @@ class FJDXCLI(object):
                     break
         except Exception as e:
             raise Exception(_("Execute CLI "
-                              "command error. Error: %s") % six.text_type(e))
+                              "command error. Error: %s") % e)
         finally:
             if ssh:
                 self.ssh_pool.put(ssh)
                 self.ssh_pool.remove(ssh)
         return stdoutdata
 
+    def _show_cli_error_message(self, **option):
+        """Get error messages by error code."""
+        output = self._exec_cli("show cli-error-code",
+                                **option)
+        rc = output['rc']
+        if rc != str(CONSTANTS.RC_OK):
+            raise Exception(_('_show_cli_error_message failed. '
+                              'Return code: %lu') % rc)
+        message = output['message'][1]
+        output['message'] = message.split('\t')[1]
+        return output
+
     def _create_error_message(self, code, msg):
         """Create error code and message using arguements."""
         message = None
-        if code in self.SMIS_dic:
-            rc = self.SMIS_dic[code]
-        else:
-            rc = 'E' + code
-
-            # TODO(whfnst): we will have a dic to store errors.
-            if rc == "E0001":
-                message = "Bad value: %s" % msg
-            elif rc == "ED184":
-                message = "Because OPC is being executed, "
-                "the processing was discontinued."
-            else:
-                message = msg
+        rc = 'E' + code
+        try:
+            option = {
+                'error-code': code
+            }
+            message = self._show_cli_error_message(**option)['message']
+        except Exception:
+            message = CONSTANTS.CLIRETCODE_dic.get(rc, msg)
 
         return rc, message
 
@@ -188,7 +203,7 @@ class FJDXCLI(object):
     def _get_option(**option):
         """Create option strings from dictionary."""
         ret = ""
-        for key, value in six.iteritems(option):
+        for key, value in option.items():
             ret += " -%(key)s %(value)s" % {'key': key, 'value': value}
         return ret
 
@@ -204,7 +219,7 @@ class FJDXCLI(object):
                                     **option)
             # Return error.
             rc = output['rc']
-            if rc != "0":
+            if rc != str(CONSTANTS.RC_OK):
                 return output
 
             userlist = output.get('message')
@@ -217,20 +232,28 @@ class FJDXCLI(object):
 
             output['message'] = role
         except Exception as ex:
-            if 'show users' in six.text_type(ex):
+            if 'show users' in str(ex):
                 msg = ("Specified user(%s) does not have Software role"
                        % self.user)
-            elif 'Error connecting' in six.text_type(ex):
-                msg = (six.text_type(ex)[34:] +
+            elif 'Error connecting' in str(ex):
+                msg = (str(ex)[34:] +
                        ', Please check fujitsu_private_key_path or .xml file')
             else:
-                msg = six.text_type(ex)
+                msg = str(ex)
             output = {
                 'result': 0,
-                'rc': '4',
+                'rc': str(CONSTANTS.RC_FAILED),
                 'message': msg
             }
         return output
+
+    def _expand_volume(self, **option):
+        """Exec expand volume."""
+        return self._exec_cli("expand volume", **option)
+
+    def _set_volume_qos(self, **option):
+        """Exec set volume-qos."""
+        return self._exec_cli("set volume-qos", **option)
 
     def _show_pool_provision(self, **option):
         """Get TPP provision capacity information."""
@@ -239,7 +262,7 @@ class FJDXCLI(object):
 
             rc = output['rc']
 
-            if rc != "0":
+            if rc != str(CONSTANTS.RC_OK):
                 return output
 
             clidatalist = output.get('message')
@@ -250,15 +273,234 @@ class FJDXCLI(object):
                 if clidata[0] == 'FFFF':
                     break
                 data += int(clidata[7], 16)
-            provision = data / 2097152
+            provision = data / 2048
 
             output['message'] = provision
         except Exception as ex:
             output = {
                 'result': 0,
-                'rc': '4',
-                'message': "show pool provision capacity error: %s"
-                           % six.text_type(ex)
+                'rc': str(CONSTANTS.RC_FAILED),
+                'message': "show pool provision capacity error: %s" % ex
             }
 
         return output
+
+    def _show_copy_sessions(self, **option):
+        """Get copy sessions."""
+        try:
+            output = self._exec_cli("show copy-sessions", **option)
+
+            # return error
+            rc = output['rc']
+
+            if rc != str(CONSTANTS.RC_OK):
+                return output
+
+            cpsdatalist = []
+            clidatalist = output.get('message')
+
+            for clidataline in clidatalist[1:]:
+                clidata = clidataline.split('\t')
+                # Get CopyType
+                if clidata[2] == '01':
+                    # CopyKind: OPC
+                    if bin(int(clidata[3], 16) & 16) != 0:
+                        # eg. 0b10010000
+                        temp_type = 'Snap'
+                    elif bin(int(clidata[3], 16) & 64) != 0:
+                        # eg. 0b11000000
+                        temp_type = 'Snap+'
+                    else:
+                        temp_type = 'Other'
+                elif clidata[2] == '02':
+                    # CopyKind: EC
+                    if clidata[5] == 'FF':
+                        temp_type = 'EC'
+                    elif clidata[5] == '10':
+                        temp_type = 'Sync_REC'
+                    else:
+                        temp_type = 'Other'
+                else:
+                    temp_type = 'Other'
+
+                # Get Phases
+                if clidata[6] == '00':
+                    temp_phase = 'No_Pair'
+                elif clidata[6] == '01':
+                    temp_phase = 'Copying'
+                elif clidata[6] == '02':
+                    temp_phase = 'Equivalent'
+                elif clidata[6] == '03':
+                    temp_phase = 'Tracking'
+                elif clidata[6] == '04':
+                    temp_phase = 'Tracking_Copying'
+                elif clidata[6] == '06':
+                    temp_phase = 'Readying'
+                else:
+                    temp_phase = 'Other'
+
+                # Get CopyStatus
+                if clidata[7] == '00':
+                    temp_status = 'Idle'
+                elif clidata[7] == '01':
+                    temp_status = 'Reserve'
+                elif clidata[7] == '02':
+                    temp_status = 'Active'
+                elif clidata[7] == '03':
+                    temp_status = 'Error_Suspend'
+                elif clidata[7] == '04':
+                    temp_status = 'Suspend'
+                elif clidata[7] == '05':
+                    temp_status = 'Halt'
+                else:
+                    temp_status = 'Other'
+
+                cpsdatalist.append({'Source Num': int(clidata[13], 16),
+                                    'Dest Num': int(clidata[14], 16),
+                                    'Type': temp_type,
+                                    'Status': temp_status,
+                                    'Phase': temp_phase,
+                                    'Session ID': int(clidata[0], 16)})
+
+            output['message'] = cpsdatalist
+        except Exception as ex:
+            output = {'result': 0,
+                      'rc': str(CONSTANTS.RC_FAILED),
+                      'message': "Show copy sessions error: %s"
+                                 % str(ex)}
+
+        return output
+
+    def _show_qos_bandwidth_limit(self, **option):
+        """Get qos bandwidth limit."""
+        clidata = None
+        try:
+            output = self._exec_cli("show qos-bandwidth-limit", **option)
+
+            # return error
+            rc = output['rc']
+
+            if rc != str(CONSTANTS.RC_OK):
+                return output
+
+            qoslist = []
+            clidatalist = output.get('message')
+
+            for clidataline in clidatalist[1:]:
+                clidata = clidataline.split('\t')
+                qoslist.append({'total_limit': int(clidata[0], 16),
+                                'total_iops_sec': int(clidata[1], 16),
+                                'total_bytes_sec': int(clidata[2], 16),
+                                'read_limit': int(clidata[0], 16),
+                                'read_iops_sec': int(clidata[3], 16),
+                                'read_bytes_sec': int(clidata[4], 16),
+                                'write_limit': int(clidata[0], 16),
+                                'write_iops_sec': int(clidata[5], 16),
+                                'write_bytes_sec': int(clidata[6], 16)})
+
+            output['message'] = qoslist
+
+        except IndexError as ex:
+            msg = ('The results returned by cli are not as expected. '
+                   'Exception string: %s' % clidata)
+            output = {'result': 0,
+                      'rc': str(CONSTANTS.RC_FAILED),
+                      'message': "Show qos bandwidth limit error: %s. %s"
+                                 % (ex, msg)}
+
+        except Exception as ex:
+            output = {'result': 0,
+                      'rc': str(CONSTANTS.RC_FAILED),
+                      'message': "Show qos bandwidth limit error: %s" % ex}
+
+        return output
+
+    def _set_qos_bandwidth_limit(self, **option):
+        """Set qos bandwidth limit"""
+        return self._exec_cli("set qos-bandwidth-limit", **option)
+
+    def _show_volume_qos(self, **option):
+        """Get volumes with qos."""
+        clidata = None
+        try:
+            output = self._exec_cli("show volume-qos", **option)
+
+            # return error
+            rc = output['rc']
+
+            if rc != str(CONSTANTS.RC_OK):
+                return output
+
+            vqosdatalist = []
+            clidatalist = output.get('message')
+
+            for clidataline in clidatalist[1:]:
+                clidata = clidataline.split('\t')
+                vqosdatalist.append({'total_limit': int(clidata[2], 16),
+                                     'read_limit': int(clidata[3], 16),
+                                     'write_limit': int(clidata[4], 16)})
+
+            output['message'] = vqosdatalist
+
+        except IndexError as ex:
+            msg = ('The results returned by cli are not as expected. '
+                   'Exception string: %s' % clidata)
+            output = {'result': 0,
+                      'rc': str(CONSTANTS.RC_FAILED),
+                      'message': "Show volume qos error: %s. %s" % (ex, msg)}
+
+        except Exception as ex:
+            output = {'result': 0,
+                      'rc': str(CONSTANTS.RC_FAILED),
+                      'message': "Show volume qos error: %s" % ex}
+
+        return output
+
+    def _show_enclosure_status(self, **option):
+        """Get the version of machine."""
+        clidata = None
+        try:
+            output = self._exec_cli("show enclosure-status", **option)
+
+            # return error
+            rc = output['rc']
+
+            if rc != str(CONSTANTS.RC_OK):
+                return output
+
+            clidatalist = output.get('message')
+            clidata = clidatalist[0].split('\t')
+            versioninfo = {'version': clidata[11]}
+
+            output['message'] = versioninfo
+
+        except IndexError as ex:
+            msg = ('The results returned by cli are not as expected. '
+                   'Exception string: %s' % clidata)
+            output = {'result': 0,
+                      'rc': str(CONSTANTS.RC_FAILED),
+                      'message': "Show enclosure status error: %s. %s"
+                                 % (ex, msg)}
+
+        except Exception as ex:
+            output = {'result': 0,
+                      'rc': str(CONSTANTS.RC_FAILED),
+                      'message': "Show enclosure status error: %s" % ex}
+
+        return output
+
+    def _start_copy_snap_opc(self, **option):
+        """Exec start copy-snap-opc."""
+        return self._exec_cli("start copy-snap-opc", **option)
+
+    def _stop_copy_session(self, **option):
+        """Exec stop copy-session."""
+        return self._exec_cli("stop copy-session", **option)
+
+    def _start_copy_opc(self, **option):
+        """Exec start copy-opc."""
+        return self._exec_cli("start copy-opc", **option)
+
+    def _delete_volume(self, **option):
+        """Exec delete volume."""
+        return self._exec_cli('delete volume', **option)

@@ -22,7 +22,6 @@ from oslo_utils.secretutils import md5
 from oslo_utils import strutils
 from oslo_utils import units
 import packaging.version
-import six
 
 from cinder import exception
 from cinder.i18n import _
@@ -137,6 +136,11 @@ POWERMAX_ARRAY_TAG_LIST = 'powermax_array_tag_list'
 POWERMAX_SHORT_HOST_NAME_TEMPLATE = 'powermax_short_host_name_template'
 POWERMAX_PORT_GROUP_NAME_TEMPLATE = 'powermax_port_group_name_template'
 PORT_GROUP_LABEL = 'port_group_label'
+REST_API_CONNECT_TIMEOUT = 'rest_api_connect_timeout'
+REST_API_READ_TIMEOUT = 'rest_api_read_timeout'
+REST_API_CONNECT_TIMEOUT_KEY = 'RestAPIConnectTimeout'
+REST_API_READ_TIMEOUT_KEY = 'RestAPIReadTimeout'
+DISABLE_PROTECTED_SNAP = 'powermax:disable_protected_snap'
 
 # Array Models, Service Levels & Workloads
 VMAX_HYBRID_MODELS = ['VMAX100K', 'VMAX200K', 'VMAX400K']
@@ -176,6 +180,7 @@ LOAD_LOOKBACK = 'load_look_back'
 LOAD_LOOKBACK_RT = 'load_look_back_real_time'
 PORT_GROUP_LOAD_METRIC = 'port_group_load_metric'
 PORT_LOAD_METRIC = 'port_load_metric'
+SNAPVX_UNLINK_SYMFORCE = 'snapvx_unlink_symforce'
 
 # One minute in milliseconds
 ONE_MINUTE = 60000
@@ -283,7 +288,7 @@ class PowerMaxUtils(object):
                 extra_specs = volume_types.get_volume_type_extra_specs(type_id)
         except Exception as e:
             LOG.debug('Exception getting volume type extra specs: %(e)s',
-                      {'e': six.text_type(e)})
+                      {'e': str(e)})
         return extra_specs
 
     @staticmethod
@@ -324,7 +329,7 @@ class PowerMaxUtils(object):
         :returns: string -- delta in string H:MM:SS
         """
         delta = end_time - start_time
-        return six.text_type(datetime.timedelta(seconds=int(delta)))
+        return str(datetime.timedelta(seconds=int(delta)))
 
     def get_default_storage_group_name(
             self, srp_name, slo, workload, is_compression_disabled=False,
@@ -527,6 +532,15 @@ class PowerMaxUtils(object):
         host_list = host.split('+')
         return host_list[-1]
 
+    def is_protected_snap_disabled(self, extra_specs):
+        """Check is the disable_protected_snap flag set.
+
+        :param extra_specs: extra specifications :returns: boolean
+        """
+        if extra_specs.get(DISABLE_PROTECTED_SNAP, False) in IS_TRUE:
+            return True
+        return False
+
     def is_compression_disabled(self, extra_specs):
         """Check is compression is to be disabled.
 
@@ -628,7 +642,7 @@ class PowerMaxUtils(object):
                     error_message = (
                         _("Failed to retrieve all necessary SRDF "
                           "information. Error received: %(ke)s.") %
-                        {'ke': six.text_type(ke)})
+                        {'ke': str(ke)})
                     LOG.exception(error_message)
                     raise exception.VolumeBackendAPIException(
                         message=error_message)
@@ -643,7 +657,7 @@ class PowerMaxUtils(object):
                         "SRDF Sync wait/retries options not set or set "
                         "incorrectly, defaulting to 200 retries with a 3 "
                         "second wait. Configuration load warning: %(ke)s.",
-                        {'ke': six.text_type(ke)})
+                        {'ke': str(ke)})
                     rep_config_element['sync_retries'] = 200
                     rep_config_element['sync_interval'] = 3
 
@@ -719,7 +733,7 @@ class PowerMaxUtils(object):
         """
         LOG.info("Updating status for group: %(id)s.", {'id': group_id})
         model_update = ({'id': volume.id, 'status': 'available',
-                         'provider_location': six.text_type(volume_dict)})
+                         'provider_location': str(volume_dict)})
         if meta:
             model_update['metadata'] = meta
         return model_update

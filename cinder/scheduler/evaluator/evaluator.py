@@ -13,8 +13,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from __future__ import annotations  # Remove when only supporting python 3.9+
-
 import operator
 import re
 import sys
@@ -32,7 +30,7 @@ def _operatorOperands(tokenList):
         try:
             op1 = next(it)
             op2 = next(it)
-            yield(op1, op2)
+            yield (op1, op2)
         except StopIteration:
             break
 

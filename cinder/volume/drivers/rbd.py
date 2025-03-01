@@ -1,4 +1,5 @@
 #    Copyright 2013 OpenStack Foundation
+#    Copyright 2022 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -13,8 +14,6 @@
 #    under the License.
 """RADOS Block Device Driver"""
 
-from __future__ import annotations
-
 import binascii
 import errno
 import json
@@ -22,7 +21,7 @@ import math
 import os
 import tempfile
 import typing
-from typing import Any, Optional, Union  # noqa: H301
+from typing import Any, Optional, Union
 import urllib.parse
 
 from castellan import key_manager
@@ -68,9 +67,9 @@ RBD_OPTS = [
                help='The name of ceph cluster'),
     cfg.StrOpt('rbd_pool',
                default='rbd',
-               help='The RADOS pool where rbd volumes are stored'),
+               help='The RADOS pool where RBD volumes are stored'),
     cfg.StrOpt('rbd_user',
-               help='The RADOS client name for accessing rbd volumes '
+               help='The RADOS client name for accessing RBD volumes '
                     '- only set when using cephx authentication'),
     cfg.StrOpt('rbd_ceph_conf',
                default='',  # default determined by librados
@@ -133,6 +132,9 @@ RBD_OPTS = [
     cfg.IntOpt('deferred_deletion_purge_interval', default=60,
                help='Number of seconds between runs of the periodic task '
                     'to purge volumes tagged for deletion.'),
+    cfg.IntOpt('rbd_concurrent_flatten_operations', default=3, min=0,
+               help='Number of flatten operations that will run '
+                    'concurrently on this volume service.')
 ]
 
 CONF = cfg.CONF
@@ -200,7 +202,7 @@ class RBDDriverException(exception.VolumeDriverException):
 
 
 class RBDVolumeProxy(object):
-    """Context manager for dealing with an existing rbd volume.
+    """Context manager for dealing with an existing RBD volume.
 
     This handles connecting to rados and opening an ioctx automatically, and
     otherwise acts like a librbd Image object.
@@ -355,6 +357,10 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
 
         self.keyring_data: Optional[str] = None
         self._set_keyring_attributes()
+
+        self._semaphore = utils.semaphore_factory(
+            limit=self.configuration.rbd_concurrent_flatten_operations,
+            concurrent_processes=1)
 
     def _set_keyring_attributes(self) -> None:
         # The rbd_keyring_conf option is not available for OpenStack usage
@@ -602,6 +608,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             client = self.rados.Rados(rados_id=user,
                                       clustername=name,
                                       conffile=conf)
+            client = tpool.Proxy(client)
 
             try:
                 if timeout >= 0:
@@ -829,6 +836,25 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                        'dst_size': volume.size})
             self._resize(volume)
 
+    def _flatten_volume(
+            self,
+            image_name: str,
+            client: RADOSClient) -> None:
+
+        # Flatten destination volume
+        try:
+            with RBDVolumeProxy(self, image_name, client=client,
+                                ioctx=client.ioctx) as dest_volume:
+                LOG.debug("flattening volume %s", image_name)
+                dest_volume.flatten()
+        except Exception as e:
+            msg = (_("Failed to flatten volume %(volume)s with "
+                     "error: %(error)s.") %
+                   {'volume': image_name,
+                    'error': e})
+            LOG.exception(msg)
+            raise exception.VolumeBackendAPIException(data=msg)
+
     def create_cloned_volume(
             self,
             volume: Volume,
@@ -889,24 +915,12 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             # volumes are always flattened.
             if (volume.use_quota and
                     depth >= self.configuration.rbd_max_clone_depth):
+
                 LOG.info("maximum clone depth (%d) has been reached - "
                          "flattening dest volume",
                          self.configuration.rbd_max_clone_depth)
 
-                # Flatten destination volume
-                try:
-                    with RBDVolumeProxy(self, dest_name, client=client,
-                                        ioctx=client.ioctx) as dest_volume:
-                        LOG.debug("flattening dest volume %s", dest_name)
-                        dest_volume.flatten()
-                except Exception as e:
-                    msg = (_("Failed to flatten volume %(volume)s with "
-                             "error: %(error)s.") %
-                           {'volume': dest_name,
-                            'error': e})
-                    LOG.exception(msg)
-                    src_volume.close()
-                    raise exception.VolumeBackendAPIException(data=msg)
+                self._flatten_volume(dest_name, client)
 
                 try:
                     # remove temporary snap
@@ -1161,17 +1175,28 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             volume_update = self._setup_volume(volume)
         except Exception:
             with excutils.save_and_reraise_exception():
-                LOG.error('Error creating rbd image %(vol)s.',
+                LOG.error('Error creating RBD image %(vol)s.',
                           {'vol': vol_name})
                 self.RBDProxy().remove(client.ioctx, vol_name)
 
         return volume_update
 
+    @utils.limit_operations
+    def _do_flatten(self, volume_name: str, pool: str) -> None:
+        LOG.debug('flattening %s/%s', pool, volume_name)
+        try:
+            with RBDVolumeProxy(self, volume_name, pool=pool) as vol:
+                vol.flatten()
+                LOG.debug('flattening of %s/%s has completed',
+                          pool, volume_name)
+        except self.rbd.ImageNotFound:
+            LOG.debug('image %s not found during flatten', volume_name)
+            # do nothing
+
     def _flatten(self, pool: str, volume_name: str) -> None:
-        LOG.debug('flattening %(pool)s/%(img)s',
-                  dict(pool=pool, img=volume_name))
-        with RBDVolumeProxy(self, volume_name, pool) as vol:
-            vol.flatten()
+        image = pool + '/' + volume_name
+        LOG.debug('Queueing %s for flattening', image)
+        self._do_flatten(volume_name, pool)
 
     def _get_stripe_unit(self, ioctx: 'rados.Ioctx', volume_name: str) -> int:
         """Return the correct stripe unit for a cloned volume.
@@ -1309,23 +1334,6 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
 
         return (None, None, None)
 
-    def _get_children_info(self,
-                           volume: 'rbd.Image',
-                           snap: Optional[str]) -> list[tuple]:
-        """List children for the given snapshot of a volume(image).
-
-        Returns a list of (pool, image).
-        """
-
-        children_list = []
-
-        if snap:
-            volume.set_snap(snap)
-            children_list = volume.list_children()
-            volume.set_snap(None)
-
-        return children_list
-
     def _delete_clone_parent_refs(self,
                                   client: RADOSClient,
                                   parent_name: str,
@@ -1368,141 +1376,210 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                 g_parent_snap = typing.cast(str, g_parent_snap)
                 self._delete_clone_parent_refs(client, g_parent, g_parent_snap)
 
-    def delete_volume(self, volume: Volume) -> None:
-        """Deletes a logical volume."""
-        volume_name = volume.name
-        with RADOSClient(self) as client:
+    def _flatten_children(self,
+                          client_ioctx: 'rados.Ioctx',
+                          volume_name: str,
+                          snap_name: Optional[str] = None) -> None:
+        with RBDVolumeProxy(self,
+                            volume_name,
+                            ioctx=client_ioctx) as rbd_image:
+            if snap_name is not None:
+                rbd_image.set_snap(snap_name)
+
+            children_list = rbd_image.list_children()
+
+        for (pool, child_name) in children_list:
+            LOG.info('Image %(pool)s/%(image)s%(snap)s is dependent '
+                     'on the image %(volume_name)s.',
+                     {'pool': pool,
+                      'image': child_name,
+                      'volume_name': volume_name,
+                      'snap': '@' + snap_name if snap_name else ''})
             try:
-                rbd_image = self.rbd.Image(client.ioctx, volume_name)
-            except self.rbd.ImageNotFound:
-                LOG.info("volume %s no longer exists in backend",
-                         volume_name)
-                return
+                self._flatten(pool, child_name)
+            except Exception as e:
+                LOG.error(e)
+                raise
 
-            clone_snap = None
-            parent = None
+    def _move_volume_to_trash(self,
+                              client_ioctx: 'rados.Ioctx',
+                              volume_name: str,
+                              delay: int) -> None:
+        # trash_move() will succeed in some situations when a regular
+        # remove() call will fail due to image dependencies
+        LOG.debug("moving volume %s to trash", volume_name)
+        try:
+            self.RBDProxy().trash_move(client_ioctx,
+                                       volume_name,
+                                       delay)
+        except self.rbd.ImageBusy:
+            msg = _('ImageBusy error raised while trashing RBD '
+                    'volume.')
+            LOG.warning(msg)
+            raise exception.VolumeIsBusy(msg, volume_name=volume_name)
 
-            # Ensure any backup snapshots are deleted
-            self._delete_backup_snaps(rbd_image)
-
-            # If the volume has non-clone snapshots this delete is expected to
-            # raise VolumeIsBusy so do so straight away.
+    def _try_remove_volume(self, client: 'rados', volume_name: str) -> bool:
+        # Try a couple of times to delete the volume, rather than
+        # stopping on the first error.
+        # In the event of simultaneous Cinder delete operations,
+        # this gives a window for other deletes of snapshots and images
+        # to complete, freeing dependencies which allow this remove to
+        # succeed.
+        @utils.retry((self.rbd.ImageBusy, self.rbd.ImageHasSnapshots),
+                     self.configuration.rados_connection_interval,
+                     self.configuration.rados_connection_retries)
+        def _do_try_remove_volume(self, client, volume_name: str) -> bool:
             try:
-                snaps = rbd_image.list_snaps()
-                for snap in snaps:
-                    if snap['name'].endswith('.clone_snap'):
-                        LOG.debug("volume has clone snapshot(s)")
-                        # We grab one of these and use it when fetching parent
-                        # info in case the volume has been flattened.
-                        clone_snap = snap['name']
-                        break
+                LOG.debug('Trying to remove image %s', volume_name)
+                self.RBDProxy().remove(client.ioctx, volume_name)
+                return True
+            except (self.rbd.ImageHasSnapshots, self.rbd.ImageBusy):
+                with excutils.save_and_reraise_exception():
+                    msg = _('deletion failed')
+                    LOG.info(msg)
+
+            return False
+
+        return _do_try_remove_volume(self, client, volume_name)
+
+    @staticmethod
+    def _find_clone_snap(rbd_image: RBDVolumeProxy) -> Optional[str]:
+        snaps = rbd_image.list_snaps()
+        for snap in snaps:
+            if snap['name'].endswith('.clone_snap'):
+                LOG.debug("volume has clone snapshot(s)")
+                # We grab one of these and use it when fetching parent
+                # info in case the volume has been flattened.
+                clone_snap = snap['name']
+                return clone_snap
+
+        return None
+
+    def _delete_volume(self, volume: Volume, client: RADOSClient) -> None:
+
+        clone_snap = None
+        parent = None
+        parent_snap = None
+
+        try:
+            with RBDVolumeProxy(self,
+                                volume.name,
+                                ioctx=client.ioctx) as rbd_image:
+                # Ensure any backup snapshots are deleted
+                self._delete_backup_snaps(rbd_image)
+
+                clone_snap = self._find_clone_snap(rbd_image)
 
                 # Determine if this volume is itself a clone
                 _pool, parent, parent_snap = self._get_clone_info(rbd_image,
-                                                                  volume_name,
+                                                                  volume.name,
                                                                   clone_snap)
-            finally:
-                rbd_image.close()
+        except self.rbd.ImageNotFound:
+            LOG.info("volume %s no longer exists in backend", volume.name)
+            return
 
-            @utils.retry(self.rbd.ImageBusy,
-                         self.configuration.rados_connection_interval,
-                         self.configuration.rados_connection_retries)
-            def _try_remove_volume(client: Any, volume_name: str) -> None:
-                if self.configuration.enable_deferred_deletion:
-                    delay = self.configuration.deferred_deletion_delay
-                else:
-                    try:
-                        self.RBDProxy().remove(client.ioctx, volume_name)
-                        return
-                    except (self.rbd.ImageHasSnapshots, self.rbd.ImageBusy):
-                        delay = 0
-                LOG.debug("moving volume %s to trash", volume_name)
-                # When using the RBD v2 clone api, deleting a volume
-                # that has a snapshot in the trash space raises a
-                # busy exception.
-                # In order to solve this, call the trash operation
-                # which should succeed when the volume has
-                # dependencies.
-                self.RBDProxy().trash_move(client.ioctx,
-                                           volume_name,
-                                           delay)
+        if clone_snap is not None:
+            # If the volume has copy-on-write clones, keep it as a silent
+            # volume which will be deleted when its snapshots and clones
+            # are deleted.
+            # TODO: only do this if it actually can't be deleted?
+            new_name = "%s.deleted" % (volume.name)
+            self.RBDProxy().rename(client.ioctx, volume.name, new_name)
+            return
 
-            if clone_snap is None:
-                LOG.debug("deleting rbd volume %s", volume_name)
-                try:
-                    _try_remove_volume(client, volume_name)
-                except self.rbd.ImageBusy:
-                    msg = (_("ImageBusy error raised while deleting rbd "
-                             "volume. This may have been caused by a "
-                             "connection from a client that has crashed and, "
-                             "if so, may be resolved by retrying the delete "
-                             "after 30 seconds has elapsed."))
-                    LOG.warning(msg)
-                    # Now raise this so that the volume stays available and the
-                    # deletion can be retried.
-                    raise exception.VolumeIsBusy(msg, volume_name=volume_name)
-                except self.rbd.ImageNotFound:
-                    LOG.info("RBD volume %s not found, allowing delete "
-                             "operation to proceed.", volume_name)
-                    return
+        LOG.debug("deleting RBD volume %s", volume.name)
 
-                # If it is a clone, walk back up the parent chain deleting
-                # references.
-                if parent:
-                    LOG.debug("volume is a clone so cleaning references")
-                    parent_snap = typing.cast(str, parent_snap)
-                    self._delete_clone_parent_refs(client, parent, parent_snap)
-            else:
-                # If the volume has copy-on-write clones we will not be able to
-                # delete it. Instead we will keep it as a silent volume which
-                # will be deleted when it's snapshot and clones are deleted.
-                new_name = "%s.deleted" % (volume_name)
-                self.RBDProxy().rename(client.ioctx, volume_name, new_name)
+        try:
+            self.RBDProxy().remove(client.ioctx, volume.name)
+            return  # the fast path was successful
+        except (self.rbd.ImageHasSnapshots, self.rbd.ImageBusy):
+            self._flatten_children(client.ioctx, volume.name)
+        except self.rbd.ImageNotFound:
+            LOG.info("RBD volume %s not found, allowing delete "
+                     "operation to proceed.", volume.name)
+            return
+
+        try:
+            if self._try_remove_volume(client, volume.name):
+                return
+        except self.rbd.ImageHasSnapshots:
+            # perform trash instead, which can succeed when snapshots exist
+            pass
+        except self.rbd.ImageBusy:
+            msg = _('ImageBusy error raised while deleting RBD volume')
+            raise exception.VolumeIsBusy(msg, volume_name=volume.name)
+
+        delay = 0
+        if self.configuration.enable_deferred_deletion:
+            delay = self.configuration.deferred_deletion_delay
+
+        # Since it failed to remove above, trash the volume here instead.
+        # This covers the scenario of an image unable to be deleted because
+        # a child snapshot of it has been trashed but not yet removed.
+        # That snapshot is not visible but is still in the dependency
+        # chain of RBD images.
+        self._move_volume_to_trash(client.ioctx, volume.name, delay)
+
+        # If it is a clone, walk back up the parent chain deleting
+        # references.
+        if parent:
+            LOG.debug("volume is a clone so cleaning references")
+            parent_snap = typing.cast(str, parent_snap)
+            self._delete_clone_parent_refs(client, parent, parent_snap)
+
+    def delete_volume(self, volume: Volume) -> None:
+        """Deletes an RBD volume."""
+        with RADOSClient(self) as client:
+            self._delete_volume(volume, client)
 
     def create_snapshot(self, snapshot: Snapshot) -> None:
-        """Creates an rbd snapshot."""
+        """Creates an RBD snapshot."""
         with RBDVolumeProxy(self, snapshot.volume_name) as volume:
             snap = snapshot.name
             volume.create_snap(snap)
             volume.protect_snap(snap)
 
     def delete_snapshot(self, snapshot: Snapshot) -> None:
-        """Deletes an rbd snapshot."""
+        """Deletes an RBD snapshot."""
         volume_name = snapshot.volume_name
         snap_name = snapshot.name
 
+        @utils.retry(self.rbd.ImageBusy,
+                     self.configuration.rados_connection_interval,
+                     self.configuration.rados_connection_retries)
+        def do_unprotect_snap(self, volume_name, snap_name):
+            try:
+                with RBDVolumeProxy(self, volume_name) as volume:
+                    volume.unprotect_snap(snap_name)
+            except self.rbd.InvalidArgument:
+                LOG.info(
+                    "InvalidArgument: Unable to unprotect snapshot %s.",
+                    snap_name)
+            except self.rbd.ImageNotFound as e:
+                LOG.info("Snapshot %s does not exist in backend.",
+                         snap_name)
+                raise e
+            except self.rbd.ImageBusy as e:
+                # flatten and then retry the operation
+                with RADOSClient(self) as client:
+                    self._flatten_children(client.ioctx,
+                                           volume_name,
+                                           snap_name)
+                raise e
+
+        try:
+            do_unprotect_snap(self, volume_name, snap_name)
+        except self.rbd.ImageBusy:
+            raise exception.SnapshotIsBusy(snapshot_name=snap_name)
+        except self.rbd.ImageNotFound:
+            return
+
         try:
             with RBDVolumeProxy(self, volume_name) as volume:
-                try:
-                    volume.unprotect_snap(snap_name)
-                except self.rbd.InvalidArgument:
-                    LOG.info(
-                        "InvalidArgument: Unable to unprotect snapshot %s.",
-                        snap_name)
-                except self.rbd.ImageNotFound:
-                    LOG.info("Snapshot %s does not exist in backend.",
-                             snap_name)
-                    return
-                except self.rbd.ImageBusy:
-                    children_list = self._get_children_info(volume, snap_name)
-
-                    if children_list:
-                        for (pool, image) in children_list:
-                            LOG.info('Image %(pool)s/%(image)s is dependent '
-                                     'on the snapshot %(snap)s.',
-                                     {'pool': pool,
-                                      'image': image,
-                                      'snap': snap_name})
-
-                    raise exception.SnapshotIsBusy(snapshot_name=snap_name)
-
-                try:
-                    volume.remove_snap(snap_name)
-                except self.rbd.ImageNotFound:
-                    LOG.info("Snapshot %s does not exist in backend.",
-                             snap_name)
+                volume.remove_snap(snap_name)
         except self.rbd.ImageNotFound:
-            LOG.warning("Volume %s does not exist in backend.", volume_name)
+            LOG.info("Snapshot %s does not exist in backend.",
+                     snap_name)
 
     def snapshot_revert_use_temp_snapshot(self) -> bool:
         """Disable the use of a temporary snapshot on revert."""
@@ -1810,7 +1887,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
     def _parse_location(location: str) -> list[str]:
         prefix = 'rbd://'
         if not location.startswith(prefix):
-            reason = _('Not stored in rbd')
+            reason = _('Not stored in RBD')
             raise exception.ImageUnacceptable(image_id=location, reason=reason)
         pieces = [urllib.parse.unquote(loc)
                   for loc in location[len(prefix):].split('/')]
@@ -1818,7 +1895,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             reason = _('Blank components')
             raise exception.ImageUnacceptable(image_id=location, reason=reason)
         if len(pieces) != 4:
-            reason = _('Not an rbd snapshot')
+            reason = _('Not an RBD snapshot')
             raise exception.ImageUnacceptable(image_id=location, reason=reason)
         return pieces
 
@@ -1851,7 +1928,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             return False
 
         if image_meta['disk_format'] != 'raw':
-            LOG.debug("rbd image clone requires image format to be "
+            LOG.debug("RBD image clone requires image format to be "
                       "'raw' but image %(image)s is '%(format)s'",
                       {"image": image_location,
                        "format": image_meta['disk_format']})
@@ -1902,16 +1979,20 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                                        context: context.RequestContext,
                                        volume: Volume,
                                        image_service,
-                                       image_id: str) -> None:
+                                       image_id: str,
+                                       disable_sparse=False) -> None:
         self._copy_image_to_volume(context, volume, image_service, image_id,
-                                   encrypted=True)
+                                   encrypted=True,
+                                   disable_sparse=disable_sparse)
 
     def copy_image_to_volume(self,
                              context: context.RequestContext,
                              volume: Volume,
                              image_service,
-                             image_id: str) -> None:
-        self._copy_image_to_volume(context, volume, image_service, image_id)
+                             image_id: str,
+                             disable_sparse: bool = False) -> None:
+        self._copy_image_to_volume(context, volume, image_service, image_id,
+                                   disable_sparse=disable_sparse)
 
     def _encrypt_image(self,
                        context: context.RequestContext,
@@ -1956,7 +2037,8 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                               volume: Volume,
                               image_service: Any,
                               image_id: str,
-                              encrypted: bool = False) -> None:
+                              encrypted: bool = False,
+                              disable_sparse: bool = False) -> None:
 
         tmp_dir = volume_utils.image_conversion_dir()
 
@@ -1964,7 +2046,8 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             image_utils.fetch_to_raw(context, image_service, image_id,
                                      tmp.name,
                                      self.configuration.volume_dd_blocksize,
-                                     size=volume.size)
+                                     size=volume.size,
+                                     disable_sparse=disable_sparse)
 
             if encrypted:
                 self._encrypt_image(context, volume, tmp_dir, tmp.name)
@@ -1998,20 +2081,18 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             raise exception.ReplicationError(reason=err_msg,
                                              volume_id=volume.id)
 
+    def _get_rbd_handle(self, volume: Volume):
+        conn = self.initialize_connection(volume, {})
+
+        connector = volume_utils.brick_get_connector('rbd')
+
+        return connector._get_rbd_handle(conn['data'])
+
     def copy_volume_to_image(self, context, volume, image_service, image_meta):
-        tmp_dir = volume_utils.image_conversion_dir()
-        tmp_file = os.path.join(tmp_dir,
-                                volume.name + '-' + image_meta['id'])
-        with fileutils.remove_path_on_error(tmp_file):
-            args = ['rbd', 'export',
-                    '--pool', self.configuration.rbd_pool,
-                    volume.name, tmp_file]
-            args.extend(self._ceph_args())
-            self._try_execute(*args)
-            volume_utils.upload_volume(context, image_service,
-                                       image_meta, tmp_file,
-                                       volume)
-        os.unlink(tmp_file)
+        source_handle = self._get_rbd_handle(volume)
+
+        volume_utils.upload_volume(context, image_service, image_meta, None,
+                                   volume, volume_fd=source_handle)
 
     def extend_volume(self, volume: Volume, new_size: str) -> None:
         """Extend an existing volume."""
@@ -2040,7 +2121,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             volume ref info to be set
         :param existing_ref:
             existing_ref is a dictionary of the form:
-            {'source-name': <name of rbd image>}
+            {'source-name': <name of RBD image>}
         """
         # Raise an exception if we didn't find a suitable rbd image.
         with RADOSClient(self) as client:
@@ -2058,7 +2139,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             volume ref info to be set
         :param existing_ref:
             existing_ref is a dictionary of the form:
-            {'source-name': <name of rbd image>}
+            {'source-name': <name of RBD image>}
         """
 
         # Check that the reference is valid
@@ -2077,7 +2158,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                                            read_only=True)
             except self.rbd.ImageNotFound:
                 kwargs = {'existing_ref': rbd_name,
-                          'reason': 'Specified rbd image does not exist.'}
+                          'reason': 'Specified RBD image does not exist.'}
                 raise exception.ManageExistingInvalidReference(**kwargs)
 
             image_size = rbd_image.size()
@@ -2120,10 +2201,10 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
         with RADOSClient(self) as client:
             for image_name in self.RBDProxy().list(client.ioctx):
                 image_id = volume_utils.extract_id_from_volume_name(image_name)
-                with RBDVolumeProxy(self, image_name, read_only=True,
-                                    client=client.cluster,
-                                    ioctx=client.ioctx) as image:
-                    try:
+                try:
+                    with RBDVolumeProxy(self, image_name, read_only=True,
+                                        client=client.cluster,
+                                        ioctx=client.ioctx) as image:
                         image_info = {
                             'reference': {'source-name': image_name},
                             'size': int(math.ceil(
@@ -2151,8 +2232,11 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                             image_info['safe_to_manage'] = True
                             image_info['reason_not_safe'] = None
                         manageable_volumes.append(image_info)
-                    except self.rbd.ImageNotFound:
-                        LOG.debug("Image %s is not found.", image_name)
+                except self.rbd.ImageNotFound:
+                    LOG.debug("Image %s is not found.", image_name)
+                except self.rbd.Error as error:
+                    LOG.debug("Cannot open image %(image)s. (%(error)s)",
+                              ({'image': image_name, 'error': error}))
 
         return volume_utils.paginate_entries_list(
             manageable_volumes, marker, limit, offset, sort_keys, sort_dirs)
@@ -2271,7 +2355,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                     source.copy(target.ioctx, volume.name)
                 except Exception:
                     with excutils.save_and_reraise_exception():
-                        LOG.error('Error copying rbd image %(vol)s to target '
+                        LOG.error('Error copying RBD image %(vol)s to target '
                                   'pool %(pool)s.',
                                   {'vol': volume.name, 'pool': rbd_pool})
                         self.RBDProxy().remove(target.ioctx, volume.name)
@@ -2352,7 +2436,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
             snapshot ref info to be set
         :param existing_ref:
             existing_ref is a dictionary of the form:
-            {'source-name': <name of rbd snapshot>}
+            {'source-name': <name of RBD snapshot>}
         """
         if not isinstance(existing_ref, dict):
             existing_ref = {"source-name": existing_ref}
@@ -2452,7 +2536,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                            for k in rbd_image.config_list()}
                 return current
         except Exception as e:
-            msg = (_("Failed to get qos specs for rbd image "
+            msg = (_("Failed to get qos specs for RBD image "
                      "%(rbd_image_name)s, due to "
                      "%(error)s.")
                    % {'rbd_image_name': volume.name,
@@ -2478,7 +2562,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                                      'qos_value': qos_val})
         except Exception as e:
             msg = (_('Failed to set qos spec %(qos_key)s '
-                     'for rbd image %(rbd_image_name)s, '
+                     'for RBD image %(rbd_image_name)s, '
                      'due to %(error)s.')
                    % {'qos_key': qos_key,
                       'rbd_image_name': volume.name,
@@ -2496,7 +2580,7 @@ class RBDDriver(driver.CloneableImageVD, driver.MigrateVD,
                               {'qos_key': key})
         except Exception as e:
             msg = (_("Failed to delete qos keys %(qos_key)s "
-                     "for rbd image %(rbd_image_name)s, "
+                     "for RBD image %(rbd_image_name)s, "
                      "due to %(error)s.")
                    % {'qos_key': key,
                       'rbd_image_name': volume.name,

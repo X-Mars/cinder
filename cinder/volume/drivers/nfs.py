@@ -26,7 +26,6 @@ from oslo_concurrency import processutils as putils
 from oslo_config import cfg
 from oslo_log import log as logging
 from oslo_utils import units
-import six
 
 from cinder import context
 from cinder import coordination
@@ -160,6 +159,16 @@ class NfsDriver(remotefs.RemoteFSSnapDriverDistributed):
             msg = _('nfs volume must be a valid raw or qcow2 image.')
             raise exception.InvalidVolume(reason=msg)
 
+        # Test if the size is accurate or if something tried to modify it
+        if info.virtual_size != volume.size * units.Gi:
+            LOG.error('The volume virtual_size does not match the size in '
+                      'cinder, aborting as we suspect an exploit. '
+                      'Virtual Size is %(vsize)s and real size is %(size)s',
+                      {'vsize': info.virtual_size, 'size': volume.size})
+            msg = _('The volume virtual_size does not match the size in '
+                    'cinder, aborting as we suspect an exploit.')
+            raise exception.InvalidVolume(reason=msg)
+
         conn_info['data']['format'] = info.file_format
         LOG.debug('NfsDriver: conn_info: %s', conn_info)
         return conn_info
@@ -178,7 +187,7 @@ class NfsDriver(remotefs.RemoteFSSnapDriverDistributed):
         # If both nas_host and nas_share_path are set we are not
         # going to use the nfs_shares_config file.  So, only check
         # for its existence if it is going to be used.
-        if((not nas_host) or (not nas_share_path)):
+        if ((not nas_host) or (not nas_share_path)):
             config = self.configuration.nfs_shares_config
             if not config:
                 msg = (_("There's no NFS config file configured (%s)") %
@@ -227,7 +236,7 @@ class NfsDriver(remotefs.RemoteFSSnapDriverDistributed):
                               '%(count)d attempts.',
                               {'share': nfs_share,
                                'count': num_attempts})
-                    raise exception.NfsException(six.text_type(e))
+                    raise exception.NfsException(str(e))
                 LOG.debug('Mount attempt %(attempt)d failed: %(exc)s.\n'
                           'Retrying mount ...',
                           {'attempt': attempt, 'exc': e})
@@ -383,18 +392,22 @@ class NfsDriver(remotefs.RemoteFSSnapDriverDistributed):
             raise exception.ExtendVolumeError(reason='Insufficient space to'
                                               ' extend volume %s to %sG'
                                               % (volume.id, new_size))
-        path = self.local_path(volume)
+        # Use the active image file because this volume might have snapshot(s).
+        active_file = self.get_active_image_from_info(volume)
+        active_file_path = os.path.join(self._local_volume_dir(volume),
+                                        active_file)
         LOG.info('Resizing file to %sG...', new_size)
         file_format = None
         admin_metadata = objects.Volume.get_by_id(
             context.get_admin_context(), volume.id).admin_metadata
+
         if admin_metadata and 'format' in admin_metadata:
             file_format = admin_metadata['format']
-        image_utils.resize_image(path, new_size,
+        image_utils.resize_image(active_file_path, new_size,
                                  run_as_root=self._execute_as_root,
                                  file_format=file_format)
         if file_format == 'qcow2' and not self._is_file_size_equal(
-                path, new_size):
+                active_file_path, new_size):
             raise exception.ExtendVolumeError(
                 reason='Resizing image file failed.')
 

@@ -28,7 +28,6 @@ from oslo_config import cfg
 from oslo_service import loopingcall
 from oslo_utils import units
 import paramiko
-import six
 
 from cinder import context
 import cinder.db
@@ -350,8 +349,8 @@ class StorwizeSVCManagementSimulator(object):
         ids.sort()
         for index, n in enumerate(ids):
             if n > index:
-                return six.text_type(index)
-        return six.text_type(len(ids))
+                return str(index)
+        return str(len(ids))
 
     # Check if name is valid
     @staticmethod
@@ -516,7 +515,7 @@ class StorwizeSVCManagementSimulator(object):
             num = num * 1024
             unit_index += 1
 
-        return six.text_type(num)
+        return str(num)
 
     def _cmd_lslicense(self, **kwargs):
         rows = [None] * 3
@@ -569,7 +568,7 @@ class StorwizeSVCManagementSimulator(object):
         for i in range(pool_num):
             row_data = [str(i + 1),
                         self._flags['storwize_svc_volpool_name'][i], 'online',
-                        '1', six.text_type(len(self._volumes_list)),
+                        '1', str(len(self._volumes_list)),
                         '3573412790272', '256', '3529926246400',
                         '1693247906775',
                         '26843545600', '38203734097', '47', '80', 'auto',
@@ -801,13 +800,12 @@ port_speed!N/A
                 value1 = filter1.split('=')[1]
                 value2 = filter2.split('=')[1]
                 for v in ports:
-                    if(six.text_type(v[5]) == value1 and six.text_type(
-                            v[7]) == value2):
+                    if (str(v[5]) == value1 and str(v[7]) == value2):
                         rows.append(v)
             else:
                 value = kwargs['filtervalue'].split('=')[1]
                 for v in ports:
-                    if six.text_type(v[5]) == value:
+                    if str(v[5]) == value:
                         rows.append(v)
         else:
             rows = ports
@@ -866,7 +864,7 @@ port_speed!N/A
 
             value = kwargs['filtervalue'].split('=')[1]
             for v in ports:
-                if six.text_type(v[5]) == value:
+                if str(v[5]) == value:
                     rows.append(v)
         else:
             rows = ports
@@ -1146,7 +1144,7 @@ port_speed!N/A
         curr_size = int(self._volumes_list[vol_name]['capacity'])
         addition = size * units.Gi
         self._volumes_list[vol_name]['capacity'] = (
-            six.text_type(curr_size + addition))
+            str(curr_size + addition))
         return ('', '')
 
     def _get_fcmap_info(self, vol_name):
@@ -1182,7 +1180,7 @@ port_speed!N/A
                     cap = self._convert_bytes_units(vol['capacity'])
                 else:
                     cap = vol['capacity']
-                rows.append([six.text_type(vol['id']), vol['name'],
+                rows.append([str(vol['id']), vol['name'],
                              vol['IO_group_id'],
                              vol['IO_group_name'], 'online', '0',
                              _get_test_pool(),
@@ -1207,7 +1205,7 @@ port_speed!N/A
                     item = self._convert_bytes_units(item)
             rows = []
 
-            rows.append(['id', six.text_type(vol['id'])])
+            rows.append(['id', str(vol['id'])])
             rows.append(['name', vol['name']])
             rows.append(['IO_group_id', vol['IO_group_id']])
             rows.append(['IO_group_name', vol['IO_group_name']])
@@ -1306,7 +1304,7 @@ port_speed!N/A
         if 'name' in kwargs:
             host_name = kwargs['name'].strip('\'\"')
         else:
-            host_name = 'host' + six.text_type(host_info['id'])
+            host_name = 'host' + str(host_info['id'])
 
         if self._is_invalid_name(host_name):
             return self._errors['CMMVC6527E']
@@ -1646,8 +1644,8 @@ port_speed!N/A
 
         self._fcmappings_list[fcmap_info['id']] = fcmap_info
 
-        return('FlashCopy Mapping, id [' + fcmap_info['id'] +
-               '], successfully created', '')
+        return ('FlashCopy Mapping, id [' + fcmap_info['id'] +
+                '], successfully created', '')
 
     def _cmd_prestartfcmap(self, **kwargs):
         if 'obj' not in kwargs:
@@ -1754,7 +1752,7 @@ port_speed!N/A
         filter_value = kwargs['filtervalue'].split('=')[1]
         to_delete = []
         for k, v in self._fcmappings_list.items():
-            if six.text_type(v[filter_key]) == filter_value:
+            if str(v[filter_key]) == filter_value:
                 source = self._volumes_list[v['source']]
                 target = self._volumes_list[v['target']]
                 self._state_transition('wait', v)
@@ -1802,8 +1800,8 @@ port_speed!N/A
 
         self._fcconsistgrp_list[fcconsistgrp_info['id']] = fcconsistgrp_info
 
-        return('FlashCopy Consistency Group, id [' + fcconsistgrp_info['id'] +
-               '], successfully created', '')
+        return ('FlashCopy Consistency Group, id [' + fcconsistgrp_info['id'] +
+                '], successfully created', '')
 
     def _cmd_prestartfcconsistgrp(self, **kwargs):
         if 'obj' not in kwargs:
@@ -1883,16 +1881,16 @@ port_speed!N/A
                     fcconsistgrp = self._fcconsistgrp_list[cg_id]
                     break
             rows = []
-            rows.append(['id', six.text_type(cg_id)])
+            rows.append(['id', str(cg_id)])
             rows.append(['name', fcconsistgrp['name']])
             rows.append(['status', fcconsistgrp['status']])
             rows.append(['autodelete',
-                         six.text_type(fcconsistgrp['autodelete'])])
+                         str(fcconsistgrp['autodelete'])])
             rows.append(['start_time',
-                         six.text_type(fcconsistgrp['start_time'])])
+                         str(fcconsistgrp['start_time'])])
 
             for fcmap_id in fcconsistgrp['fcmaps'].keys():
-                rows.append(['FC_mapping_id', six.text_type(fcmap_id)])
+                rows.append(['FC_mapping_id', str(fcmap_id)])
                 rows.append(['FC_mapping_name',
                              fcconsistgrp['fcmaps'][fcmap_id]])
 
@@ -2226,8 +2224,8 @@ port_speed!N/A
         self._volumes_list[master_vol]['RC_id'] = rcrel_info['id']
         self._volumes_list[aux_vol]['RC_name'] = rcrel_info['name']
         self._volumes_list[aux_vol]['RC_id'] = rcrel_info['id']
-        return('RC Relationship, id [' + rcrel_info['id'] +
-               '], successfully created', '')
+        return ('RC Relationship, id [' + rcrel_info['id'] +
+                '], successfully created', '')
 
     def _cmd_lsrcrelationship(self, **kwargs):
         rows = []
@@ -2792,8 +2790,8 @@ port_speed!N/A
         rccg_info['cycle_period_seconds'] = '300'
         self._rcconsistgrp_list[rccg_info['name']] = rccg_info
 
-        return('RC Consistency Group, id [' + rccg_info['id'] +
-               '], successfully created', '')
+        return ('RC Consistency Group, id [' + rccg_info['id'] +
+                '], successfully created', '')
 
     def _cmd_lsrcconsistgrp(self, **kwargs):
         rows = []
@@ -2971,7 +2969,7 @@ port_speed!N/A
         filter_key = kwargs['filtervalue'].split('=')[0]
         filter_value = kwargs['filtervalue'].split('=')[1]
         for k, v in self._partnership_list.items():
-            if six.text_type(v[filter_key]) == filter_value:
+            if str(v[filter_key]) == filter_value:
                 rows.append([v['id'], v['name'], v['location'],
                              v['partnership'], v['type'], v['cluster_ip'],
                              v['event_log_sequence']])
@@ -3010,7 +3008,7 @@ port_speed!N/A
         partner_info['partnership'] = 'fully_configured'
 
         self._partnership_list[partner_info['id']] = partner_info
-        return('', '')
+        return ('', '')
 
     def _cmd_mkfcpartnership(self, **kwargs):
         if 'obj' not in kwargs:
@@ -3037,7 +3035,7 @@ port_speed!N/A
         partner_info['backgroundcopyrate'] = copyrate
         partner_info['partnership'] = 'fully_configured'
         self._partnership_list[partner_info['id']] = partner_info
-        return('', '')
+        return ('', '')
 
     def _cmd_chpartnership(self, **kwargs):
         if 'obj' not in kwargs:
@@ -3049,7 +3047,7 @@ port_speed!N/A
         partner_state = ('fully_configured' if 'start' in kwargs
                          else 'fully_configured_stopped')
         self._partnership_list[peer_sys]['partnership'] = partner_state
-        return('', '')
+        return ('', '')
 
     # The main function to run commands on the management simulator
     def execute_command(self, cmd, check_exit_code=True):
@@ -3451,9 +3449,9 @@ class StorwizeSVCISCSIDriverTestCase(test.TestCase):
                                'storwize_svc_allow_tenant_qos': True,
                                'storwize_preferred_host_site': self.host_site}
             wwpns = [
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16),
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16)]
-            initiator = 'test.initiator.%s' % six.text_type(
+                str(random.randint(0, 9999999999999999)).zfill(16),
+                str(random.randint(0, 9999999999999999)).zfill(16)]
+            initiator = 'test.initiator.%s' % str(
                 random.randint(10000, 99999))
             self._connector = {'ip': '1.234.56.78',
                                'host': 'storwize-svc-test',
@@ -3920,14 +3918,12 @@ class StorwizeSVCISCSIDriverTestCase(test.TestCase):
 
         # Check the multipath host-volume map return value
         # target_iqns and target_portals have no guaranteed order
-        six.assertCountEqual(self,
-                             exp_m_path['data']['target_iqns'],
-                             ret['data']['target_iqns'])
+        self.assertCountEqual(exp_m_path['data']['target_iqns'],
+                              ret['data']['target_iqns'])
         del exp_m_path['data']['target_iqns']
 
-        six.assertCountEqual(self,
-                             exp_m_path['data']['target_portals'],
-                             ret['data']['target_portals'])
+        self.assertCountEqual(exp_m_path['data']['target_portals'],
+                              ret['data']['target_portals'])
         del exp_m_path['data']['target_portals']
 
         for k, v in exp_m_path['data'].items():
@@ -4007,8 +4003,8 @@ class StorwizeSVCISCSIDriverTestCase(test.TestCase):
                 for host_exists in ['yes-auth', 'yes-noauth', 'no']:
                     self._set_flag('storwize_svc_iscsi_chap_enabled',
                                    auth_enabled)
-                    case = 'en' + six.text_type(
-                        auth_enabled) + 'ex' + six.text_type(host_exists)
+                    case = 'en' + str(
+                        auth_enabled) + 'ex' + str(host_exists)
                     conn_na = {'initiator': 'test:init:%s' %
                                             random.randint(10000, 99999),
                                'ip': '11.11.11.11',
@@ -4123,10 +4119,9 @@ class StorwizeSVCISCSIDriverTestCase(test.TestCase):
             types[protocol] = volume_types.create(ctxt, protocol, opts)
 
         # Create a connector for the second 'host'
-        wwpns = [six.text_type(random.randint(0, 9999999999999999)).zfill(16),
-                 six.text_type(random.randint(0, 9999999999999999)).zfill(16)]
-        initiator = 'test.initiator.%s' % six.text_type(random.randint(10000,
-                                                                       99999))
+        wwpns = [str(random.randint(0, 9999999999999999)).zfill(16),
+                 str(random.randint(0, 9999999999999999)).zfill(16)]
+        initiator = 'test.initiator.%s' % str(random.randint(10000, 99999))
         conn2 = {'ip': '1.234.56.79',
                  'host': 'storwize-svc-test2',
                  'wwpns': wwpns,
@@ -4178,9 +4173,9 @@ class StorwizeSVCFcDriverTestCase(test.TestCase):
                                'storwize_svc_multipath_enabled': False,
                                'storwize_svc_allow_tenant_qos': True}
             wwpns = [
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16),
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16)]
-            initiator = 'test.initiator.%s' % six.text_type(
+                str(random.randint(0, 9999999999999999)).zfill(16),
+                str(random.randint(0, 9999999999999999)).zfill(16)]
+            initiator = 'test.initiator.%s' % str(
                 random.randint(10000, 99999))
             self._connector = {'ip': '1.234.56.78',
                                'host': 'storwize-svc-test',
@@ -5011,10 +5006,9 @@ class StorwizeSVCFcDriverTestCase(test.TestCase):
             types[protocol] = volume_types.create(ctxt, protocol, opts)
 
         # Create a connector for the second 'host'
-        wwpns = [six.text_type(random.randint(0, 9999999999999999)).zfill(16),
-                 six.text_type(random.randint(0, 9999999999999999)).zfill(16)]
-        initiator = 'test.initiator.%s' % six.text_type(random.randint(10000,
-                                                                       99999))
+        wwpns = [str(random.randint(0, 9999999999999999)).zfill(16),
+                 str(random.randint(0, 9999999999999999)).zfill(16)]
+        initiator = 'test.initiator.%s' % str(random.randint(10000, 99999))
         conn2 = {'ip': '1.234.56.79',
                  'host': 'storwize-svc-test2',
                  'wwpns': wwpns,
@@ -5076,9 +5070,9 @@ class StorwizeSVCCommonDriverTestCase(test.TestCase):
             self.fcdriver = StorwizeSVCFcFakeDriver(
                 configuration=config)
             wwpns = [
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16),
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16)]
-            initiator = 'test.initiator.%s' % six.text_type(
+                str(random.randint(0, 9999999999999999)).zfill(16),
+                str(random.randint(0, 9999999999999999)).zfill(16)]
+            initiator = 'test.initiator.%s' % str(
                 random.randint(10000, 99999))
             self._connector = {'ip': '1.234.56.78',
                                'host': 'storwize-svc-test',
@@ -8945,7 +8939,7 @@ class StorwizeSVCCommonDriverTestCase(test.TestCase):
             lsmdiskgrp.assert_not_called()
             self.assertEqual(0, lsmdiskgrp.call_count)
 
-    @ mock.patch.object(storwize_svc_common.StorwizeSSH, 'lsmdiskgrp')
+    @mock.patch.object(storwize_svc_common.StorwizeSSH, 'lsmdiskgrp')
     def test_storwize_svc_select_iogrp_with_pool_site(self, lsmdiskgrp):
         opts = {}
         state = self.driver._state
@@ -9192,7 +9186,7 @@ class StorwizeSVCCommonDriverTestCase(test.TestCase):
                                        host='openstack@svc#hyperswap1',
                                        volume_type_id=hyper_type.id)
         with (mock.patch.object(storwize_svc_common.StorwizeHelpers,
-              'convert_volume_to_hyperswap')) as convert_volume_to_hyperswap,\
+              'convert_volume_to_hyperswap')) as convert_volume_to_hyperswap, \
              (mock.patch.object(storwize_svc_common.StorwizeHelpers,
               'ensure_vdisk_no_fc_mappings')) as ensure_vdisk_no_fc_mappings:
             self.driver.create_volume_from_snapshot(vol2, snap)
@@ -10068,7 +10062,7 @@ class StorwizeSVCCommonDriverTestCase(test.TestCase):
                                  [clone_vol1, clone_vol2])
 
         with (mock.patch.object(storwize_svc_common.StorwizeHelpers,
-              'convert_volume_to_hyperswap')) as convert_volume_to_hyperswap,\
+              'convert_volume_to_hyperswap')) as convert_volume_to_hyperswap, \
              (mock.patch.object(storwize_svc_common.StorwizeHelpers,
               'ensure_vdisk_no_fc_mappings')) as ensure_vdisk_no_fc_mappings:
 
@@ -10194,7 +10188,7 @@ class StorwizeSVCCommonDriverTestCase(test.TestCase):
                                  [clone_vol1, clone_vol2])
 
         with (mock.patch.object(storwize_svc_common.StorwizeHelpers,
-              'convert_volume_to_hyperswap')) as convert_volume_to_hyperswap,\
+              'convert_volume_to_hyperswap')) as convert_volume_to_hyperswap, \
              (mock.patch.object(storwize_svc_common.StorwizeHelpers,
               'ensure_vdisk_no_fc_mappings')) as ensure_vdisk_no_fc_mappings:
 
@@ -10941,7 +10935,7 @@ class StorwizeHelpersTestCase(test.TestCase):
             'rc_controlled': 'no',
             'source_vdisk_name': 'testvol'}
         get_relationship_info.return_value = None
-        if(fc_data['copy_rate'] != '0' and fc_data['progress'] == '100'
+        if (fc_data['copy_rate'] != '0' and fc_data['progress'] == '100'
            and fc_data['status'] == 'copying'):
             (self.assertRaises(loopingcall.LoopingCallDone,
              self.storwize_svc_common._check_vdisk_fc_mappings, vol, True,
@@ -10960,7 +10954,7 @@ class StorwizeHelpersTestCase(test.TestCase):
         self.assertEqual(1, get_fc_mapping_attributes.call_count)
         self.assertEqual(0, rmfcmap.call_count)
 
-        if(fc_data['copy_rate'] == '0' and fc_data['progress'] == '0'
+        if (fc_data['copy_rate'] == '0' and fc_data['progress'] == '0'
            and fc_data['status'] in ['copying', 'idle_or_copied']):
             chfcmap.assert_called_with('4', copyrate='50', autodel='on')
             self.assertEqual(1, chfcmap.call_count)
@@ -11000,8 +10994,8 @@ class StorwizeHelpersTestCase(test.TestCase):
             'source_vdisk_name': 'testvol'}
         rel_info = {'name': 'rcrel232'}
         get_relationship_info.return_value = rel_info
-        if(fc_data['copy_rate'] != '0' and fc_data['progress'] == '100'
-           and fc_data['status'] == 'copying'):
+        if (fc_data['copy_rate'] != '0' and fc_data['progress'] == '100'
+                and fc_data['status'] == 'copying'):
             (self.assertRaises(loopingcall.LoopingCallDone,
              self.storwize_svc_common._check_vdisk_fc_mappings, vol, True,
              False, rel_info))
@@ -11019,7 +11013,7 @@ class StorwizeHelpersTestCase(test.TestCase):
         self.assertEqual(1, get_fc_mapping_attributes.call_count)
         self.assertEqual(0, rmfcmap.call_count)
 
-        if(fc_data['copy_rate'] == '0' and fc_data['progress'] == '0'
+        if (fc_data['copy_rate'] == '0' and fc_data['progress'] == '0'
            and fc_data['status'] in ['copying', 'idle_or_copied']):
             chfcmap.assert_called_with('4', copyrate='50', autodel='on')
             self.assertEqual(1, chfcmap.call_count)
@@ -11293,7 +11287,7 @@ class StorwizeHelpersTestCase(test.TestCase):
         self.storwize_svc_common.start_relationship(opts['name'])
         get_vdisk_attributes.assert_called_with(opts['name'])
         if not opts['RC_name']:
-            stoprcrelationship.assert_not_called()
+            stoprcrelationship.assert_called()
             startrcrelationship.assert_called()
         else:
             stoprcrelationship.assert_called_once_with(opts['RC_name'],
@@ -11475,7 +11469,7 @@ class StorwizeSSHTestCase(test.TestCase):
         opt = {'iogrp': 0}
         with mock.patch.object(storwize_svc_common.StorwizeSSH,
                                'run_ssh_check_created',
-                               side_effect=run_ssh_check),\
+                               side_effect=run_ssh_check), \
             mock.patch.object(storwize_svc_common.StorwizeSSH, 'lsvdisk',
                               return_value=lsvol):
             if lsvol:
@@ -11528,9 +11522,9 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
                                SVC_POOLS,
                                'replication_device': [self.rep_target]}
             wwpns = [
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16),
-                six.text_type(random.randint(0, 9999999999999999)).zfill(16)]
-            initiator = 'test.initiator.%s' % six.text_type(
+                str(random.randint(0, 9999999999999999)).zfill(16),
+                str(random.randint(0, 9999999999999999)).zfill(16)]
+            initiator = 'test.initiator.%s' % str(
                 random.randint(10000, 99999))
             self._connector = {'ip': '1.234.56.78',
                                'host': 'storwize-svc-test',
@@ -11999,7 +11993,7 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
             rep_type = self.driver._get_volume_replicated_type(
                 self.ctxt, volume)
             src_opts = self.driver._get_vdisk_params(volume['volume_type_id'])
-            opt_cycle_period_seconds = six.text_type(
+            opt_cycle_period_seconds = str(
                 src_opts.get('cycle_period_seconds'))
             self.assertEqual(opt_cycle_period_seconds, cycle_period_seconds)
             self.assertEqual(storwize_const.GMCV_MULTI, cycling_mode)
@@ -12052,7 +12046,7 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
         self.assertIsNotNone(rel_info)
 
         src_opts = self.driver._get_vdisk_params(volume['volume_type_id'])
-        opt_cycle_period_seconds = six.text_type(
+        opt_cycle_period_seconds = str(
             src_opts.get('cycle_period_seconds'))
         self.assertEqual(opt_cycle_period_seconds,
                          rel_info['cycle_period_seconds'])
@@ -13247,10 +13241,12 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
         delete_vdisk.assert_has_calls(calls, any_order=True)
         self.assertEqual(2, delete_vdisk.call_count)
 
-        rel_info = {'aux_vdisk_name': fake_name,
+        rel_info = {'name': 'fake_rcrel',
+                    'aux_vdisk_name': fake_name,
                     'master_vdisk_name': 'volume-%s' % fake.VOLUME_ID}
         self.driver._helpers.delete_rc_volume(fake_name, rel_info)
-        delete_relationship.assert_called_once_with(fake_name)
+        delete_relationship.assert_called_once_with(fake_name,
+                                                    rcrel=rel_info['name'])
 
     @mock.patch.object(storwize_svc_common.StorwizeHelpers,
                        'delete_vdisk')
@@ -13265,12 +13261,14 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
                                                [self.rep_target])
         self.driver.do_setup(self.ctxt)
         fake_name = 'aux_volume-%s' % fake.VOLUME_ID
-        rel_info = {'aux_vdisk_name': fake_name,
+        rel_info = {'name': 'fake_rcrel',
+                    'aux_vdisk_name': fake_name,
                     'master_vdisk_name': 'volume-%s' % fake.VOLUME_ID}
         self.driver._aux_backend_helpers.delete_rc_volume(fake_name,
                                                           rel_info,
                                                           target_vol=True)
-        delete_relationship.assert_called_with(fake_name)
+        delete_relationship.assert_called_with(fake_name,
+                                               rcrel=rel_info['name'])
         target_change_fake_name = (
             storwize_const.REPLICA_CHG_VOL_PREFIX + fake_name)
         calls = [mock.call(target_change_fake_name, force_delete=False,
@@ -13305,13 +13303,15 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
                                        delete_vdisk):
         fake_id = fake.VOLUME_ID
         fake_name = 'aux_volume-%s' % fake_id
-        rel_info = {'aux_vdisk_name': fake_name,
+        rel_info = {'name': 'fake_rcrel',
+                    'aux_vdisk_name': fake_name,
                     'master_vdisk_name': 'volume-%s' % fake_id}
         delete_vdisk.side_effect = Exception
         self.assertRaises(exception.VolumeDriverException,
                           self.driver._aux_backend_helpers.delete_rc_volume,
                           fake_name, rel_info, target_vol=True)
-        delete_relationship.assert_called_once_with(fake_name)
+        delete_relationship.assert_called_once_with(fake_name,
+                                                    rcrel=rel_info['name'])
 
     @mock.patch.object(storwize_svc_common.StorwizeHelpers,
                        'get_relationship_info')
@@ -13365,7 +13365,8 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
                                                [self.rep_target])
         self.driver.do_setup(self.ctxt)
         fake_name = 'aux_volume-%s' % fake.VOLUME_ID
-        rel_info = {'aux_vdisk_name': fake_name,
+        rel_info = {'name': 'fakercrel',
+                    'aux_vdisk_name': fake_name,
                     'master_vdisk_name': 'volume-%s' % fake.VOLUME_ID}
         self.driver._aux_backend_helpers.delete_rc_volume(
             fake_name, rel_info, target_vol=target_vol,
@@ -13375,7 +13376,8 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
         change_vol_name = (storwize_const.REPLICA_CHG_VOL_PREFIX + vol_name)
 
         if rel_info:
-            delete_relationship.assert_called_once_with(vol_name)
+            delete_relationship.assert_called_once_with(vol_name,
+                                                        rcrel=rel_info['name'])
 
         calls = [mock.call(change_vol_name, force_delete=False,
                            force_unmap=True)]
@@ -14049,7 +14051,8 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
 
         fake_info = {'volume': 'fake',
                      'master_vdisk_name': 'fake',
-                     'aux_vdisk_name': 'fake'}
+                     'aux_vdisk_name': 'fake',
+                     'name': 'fake_rcrel'}
         sync_state = {'state': storwize_const.REP_CONSIS_SYNC,
                       'primary': 'fake'}
         sync_state.update(fake_info)
@@ -14086,7 +14089,8 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
                                'get_relationship_info',
                                mock.Mock(return_value=disconn_state)):
             self.driver._sync_with_aux(self.ctxt, volumes)
-            calls = [mock.call(tgt_volume), mock.call(tgt_gmcv_volume)]
+            calls = [mock.call(tgt_volume, rcrel=fake_info['name']),
+                     mock.call(tgt_gmcv_volume, rcrel=fake_info['name'])]
             start_relationship.assert_has_calls(calls, any_order=True)
             self.assertEqual(2, start_relationship.call_count)
 
@@ -14095,8 +14099,10 @@ class StorwizeSVCReplicationTestCase(test.TestCase):
                                'get_relationship_info',
                                mock.Mock(return_value=stop_state)):
             self.driver._sync_with_aux(self.ctxt, volumes)
-            calls = [mock.call(tgt_volume, primary='aux'),
-                     mock.call(tgt_gmcv_volume, primary='aux')]
+            calls = [mock.call(tgt_volume, primary='aux',
+                               rcrel=fake_info['name']),
+                     mock.call(tgt_gmcv_volume, primary='aux',
+                               rcrel=fake_info['name'])]
             start_relationship.assert_has_calls(calls, any_order=True)
             self.assertEqual(2, start_relationship.call_count)
         self.driver.delete_volume(mm_vol)
